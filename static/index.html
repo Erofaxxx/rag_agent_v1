@@ -1,0 +1,64 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>RAG Agent</title>
+    <link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+    <aside class="sidebar">
+        <div class="sidebar-header">
+            <h1>Документы</h1>
+            <button id="newConvBtn" class="btn btn-secondary" title="Новый диалог">+ Новый чат</button>
+        </div>
+
+        <div id="dropZone" class="drop-zone">
+            <p>Перетащите сюда файлы или папку</p>
+            <p class="hint">PDF, DOCX, XLSX, PPTX · до 50 MB</p>
+            <input type="file" id="fileInput" multiple webkitdirectory="" directory="" hidden>
+            <input type="file" id="fileInputFlat" multiple hidden>
+            <div class="drop-buttons">
+                <button id="pickFolderBtn" class="btn">Выбрать папку</button>
+                <button id="pickFilesBtn" class="btn">Выбрать файлы</button>
+            </div>
+        </div>
+
+        <ul id="docList" class="doc-list"></ul>
+
+        <div class="sidebar-footer">
+            <small id="status">—</small>
+        </div>
+    </aside>
+
+    <main class="main">
+        <div id="conversationTitle" class="conversation-title">Новый диалог</div>
+        <div id="messages" class="messages">
+            <div class="welcome">
+                Загрузите документы и задавайте вопросы по их содержанию.
+                Агент ищет релевантные фрагменты и отвечает только на основе того, что нашёл.
+            </div>
+        </div>
+
+        <form id="chatForm" class="chat-form">
+            <textarea
+                id="chatInput"
+                placeholder="Спросите что-нибудь о ваших документах… (Enter — отправить, Shift+Enter — перенос строки)"
+                rows="2"
+                required
+            ></textarea>
+            <button type="submit" id="sendBtn" class="btn btn-primary">Отправить</button>
+        </form>
+    </main>
+
+    <div id="modal" class="modal hidden">
+        <div class="modal-content">
+            <button class="modal-close" id="modalClose">×</button>
+            <h3 id="modalTitle"></h3>
+            <pre id="modalBody"></pre>
+        </div>
+    </div>
+
+    <script src="/static/app.js"></script>
+</body>
+</html>

@@ -1,0 +1,36 @@
+# Web
+fastapi==0.115.5
+uvicorn[standard]==0.32.1
+python-multipart==0.0.18
+pydantic==2.10.3
+pydantic-settings==2.7.0
+python-dotenv==1.0.1
+
+# File type detection
+python-magic==0.4.27
+
+# Document parsing
+PyMuPDF==1.24.14
+pdf2image==1.17.0
+pytesseract==0.3.13
+mammoth==1.8.0
+openpyxl==3.1.5
+pandas==2.2.3
+python-pptx==1.0.2
+
+# ML / embeddings
+torch==2.5.1
+sentence-transformers==3.3.1
+FlagEmbedding==1.3.4
+faiss-cpu==1.9.0.post1
+rank-bm25==0.2.2
+numpy==1.26.4
+
+# LLM agent
+langchain==0.3.13
+langchain-core==0.3.28
+langchain-openai==0.2.14
+langgraph==0.2.60
+
+# Utils
+httpx==0.28.1

@@ -1,0 +1,22 @@
+{{DOMAIN}} {
+    encode gzip
+
+    # Лимит на размер аплоада (50 MB как в приложении + запас)
+    request_body {
+        max_size 60MB
+    }
+
+    reverse_proxy 127.0.0.1:8000 {
+        transport http {
+            read_timeout 600s
+            write_timeout 600s
+        }
+    }
+
+    log {
+        output file /var/log/caddy/rag-agent.log {
+            roll_size 10MB
+            roll_keep 5
+        }
+    }
+}
