@@ -63,3 +63,6 @@ hf_cache/
 .pytest_cache/
 .coverage
 htmlcov/
+
+# Local Claude preview tooling (mock server, launch config)
+.claude/
