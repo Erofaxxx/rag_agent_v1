@@ -113,6 +113,17 @@ function autoresize(textarea) {
     textarea.style.height = Math.min(textarea.scrollHeight, 200) + "px";
 }
 
+// Глобальный обработчик ошибок: всё что вылетело наружу из любого слушателя
+// должен увидеть пользователь, а не ловить в DevTools.
+window.addEventListener("error", (e) => {
+    console.error("Global error:", e.error || e.message);
+    try { toast(`JS error: ${(e.error && e.error.message) || e.message}`, "error"); } catch (_) {}
+});
+window.addEventListener("unhandledrejection", (e) => {
+    console.error("Unhandled rejection:", e.reason);
+    try { toast(`Promise rejected: ${e.reason && e.reason.message ? e.reason.message : e.reason}`, "error"); } catch (_) {}
+});
+
 async function api(path, opts = {}) {
     const headers = Object.assign({}, opts.headers || {});
     const method = (opts.method || "GET").toUpperCase();
@@ -351,6 +362,15 @@ async function ensurePdfJsWorker() {
 }
 
 function showSource(chunk) {
+    try {
+        return _showSourceInner(chunk);
+    } catch (e) {
+        console.error("showSource error:", e);
+        try { toast(`Источник: ${e.message}`, "error"); } catch (_) {}
+    }
+}
+
+function _showSourceInner(chunk) {
     els.modal.classList.add("hidden");
 
     const loc = [
@@ -417,11 +437,23 @@ function showSource(chunk) {
 }
 
 async function renderHtmlSource(chunk, ext, fileUrl) {
-    const data = await api(`/documents/${chunk.document_id}/html`);
     const viewer = document.getElementById("sourceHtmlViewer");
+    if (!viewer) throw new Error("html-viewer element missing");
+
+    let data;
+    try {
+        data = await api(`/documents/${chunk.document_id}/html`);
+    } catch (e) {
+        throw new Error(`fetch /html failed: ${e.message}`);
+    }
+    if (!data || typeof data.content !== "string") {
+        throw new Error(`invalid /html response: ${JSON.stringify(data).slice(0, 80)}`);
+    }
+
     let html = "";
     if (data.format === "html") {
-        // mammoth-вывод: разрешаем форматирующие теги, чистим скрипты/стили.
+        // mammoth уже отдаёт безопасный набор HTML-тегов без скриптов/стилей —
+        // если DOMPurify почему-то не загрузился, не блокируем рендер.
         html = window.DOMPurify
             ? window.DOMPurify.sanitize(data.content, { USE_PROFILES: { html: true } })
             : data.content;
@@ -431,8 +463,10 @@ async function renderHtmlSource(chunk, ext, fileUrl) {
             ? window.DOMPurify.sanitize(md, { USE_PROFILES: { html: true } })
             : md;
     } else {
-        // text / csv → plain text внутри pre, без HTML-парсинга
         html = `<pre>${escapeHtml(data.content)}</pre>`;
+    }
+    if (!html.trim()) {
+        throw new Error(`empty render (format=${data.format}, content len=${(data.content || "").length})`);
     }
     viewer.innerHTML = html;
     // Скролл к первому совпадению со snippet'ом (best-effort через выделение).
