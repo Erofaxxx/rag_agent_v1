@@ -158,19 +158,21 @@ class SearchService:
         query: str,
         k: Optional[int] = None,
         owner_user_id: Optional[int] = None,
+        notebook_id: Optional[int] = None,
     ) -> list[SearchHit]:
-        """Векторный поиск с опциональной изоляцией по владельцу документов.
+        """Векторный поиск с опциональной изоляцией по владельцу и ноутбуку.
 
-        Если задан owner_user_id, возвращаются только чанки документов, которые
-        загрузил этот пользователь. Это критично для multi-user изоляции.
+        - owner_user_id: только чанки документов этого юзера (multi-user изоляция)
+        - notebook_id: только чанки документов из этого ноутбука (workspace-изоляция)
         """
         k = k or settings.SEARCH_TOP_K
         if not query.strip():
             return []
 
-        # Фильтрация по owner — over-fetch'аем кратно больше из FAISS, чтобы
-        # после фильтрации осталось k. Для 5000 векторов это всё ещё мс.
-        over_fetch = max(k * 6, 30) if owner_user_id is not None else max(k, 15)
+        # Фильтрация по owner и/или notebook — over-fetch кратно больше из FAISS,
+        # чтобы после фильтрации осталось k. Для 5000 векторов это всё ещё мс.
+        any_filter = owner_user_id is not None or notebook_id is not None
+        over_fetch = max(k * 6, 30) if any_filter else max(k, 15)
 
         q_vec = embedding_service.encode_query(query)
         dense_hits = faiss_index.search(q_vec, k=over_fetch)
@@ -193,13 +195,19 @@ class SearchService:
         if not ordered_ids:
             return []
 
-        # Фильтр по владельцу — на уровне chunk_id'ов из БД, чтобы один SQL JOIN
-        # вместо N round-trips
+        # Фильтр по владельцу — один SQL JOIN вместо N round-trips
         if owner_user_id is not None:
             owners = db.get_chunk_owners(ordered_ids)
             ordered_ids = [
                 cid for cid in ordered_ids
                 if owners.get(cid) == owner_user_id
+            ]
+        # Фильтр по ноутбуку — аналогично
+        if notebook_id is not None:
+            nb_map = db.get_chunk_notebooks(ordered_ids)
+            ordered_ids = [
+                cid for cid in ordered_ids
+                if nb_map.get(cid) == notebook_id
             ]
 
         ordered_ids = ordered_ids[:k]

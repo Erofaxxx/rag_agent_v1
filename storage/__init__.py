@@ -8,6 +8,7 @@ from storage.database import (
     UserRow,
     SessionRow,
     AuditRow,
+    NotebookRow,
 )
 
 __all__ = [
@@ -20,4 +21,5 @@ __all__ = [
     "UserRow",
     "SessionRow",
     "AuditRow",
+    "NotebookRow",
 ]

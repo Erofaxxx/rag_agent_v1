@@ -15,6 +15,7 @@ from api.admin import router as admin_router
 from api.chat import router as chat_router
 from api.conversations import router as conversations_router
 from api.documents import router as documents_router
+from api.notebooks import router as notebooks_router
 from auth import auth_router
 from auth.dependencies import optional_user
 from auth.passwords import hash_password
@@ -137,8 +138,10 @@ class SecurityHeadersMiddleware(BaseHTTPMiddleware):
         response = await call_next(request)
         # Защита от MIME sniffing
         response.headers.setdefault("X-Content-Type-Options", "nosniff")
-        # Защита от clickjacking
-        response.headers.setdefault("X-Frame-Options", "DENY")
+        # Защита от clickjacking. SAMEORIGIN разрешает встраивать собственные
+        # страницы в iframe (нужно для PDF source viewer), но запрещает любые
+        # внешние сайты — стандартная защита от clickjacking сохраняется.
+        response.headers.setdefault("X-Frame-Options", "SAMEORIGIN")
         # Referrer не утекает за пределы origin
         response.headers.setdefault("Referrer-Policy", "strict-origin-when-cross-origin")
         # Запретить geolocation/microphone/camera по умолчанию
@@ -155,7 +158,8 @@ class SecurityHeadersMiddleware(BaseHTTPMiddleware):
             "font-src 'self' https://fonts.gstatic.com data:; "
             "img-src 'self' data: blob:; "
             "connect-src 'self'; "
-            "frame-ancestors 'none'; "
+            "frame-src 'self'; "
+            "frame-ancestors 'self'; "
             "form-action 'self'; "
             "base-uri 'self'",
         )
@@ -196,6 +200,7 @@ def _rate_limit_handler(request: Request, exc: RateLimitExceeded):
 # ===== Routers =====
 
 app.include_router(auth_router)
+app.include_router(notebooks_router)
 app.include_router(documents_router)
 app.include_router(chat_router)
 app.include_router(conversations_router)

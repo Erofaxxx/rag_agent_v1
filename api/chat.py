@@ -18,6 +18,7 @@ router = APIRouter(prefix="/api/chat", tags=["chat"])
 class ChatRequest(BaseModel):
     message: str = Field(..., min_length=1, max_length=4000)
     conversation_id: Optional[int] = None
+    notebook_id: Optional[int] = None
 
 
 class CitedChunk(BaseModel):
@@ -44,12 +45,13 @@ async def _do_llm_work(
     user_message: str,
     history: list[dict[str, str]],
     user_id: int,
+    notebook_id: Optional[int],
 ) -> tuple[int, str, list[dict[str, Any]]]:
     """Зашильженная LLM-работа: считает ответ и СОХРАНЯЕТ его в БД даже если
     клиент дисконнектнулся. Возвращает (message_id, answer, cited_chunks)."""
     try:
         result: dict[str, Any] = await run_in_threadpool(
-            answer_question, user_message, history, user_id
+            answer_question, user_message, history, user_id, notebook_id
         )
         answer = result.get("answer") or "Не удалось получить ответ от модели."
         cited = result.get("cited_chunks") or []
@@ -74,9 +76,19 @@ async def chat(req: ChatRequest, user: UserRow = Depends(require_user)) -> ChatR
         if user.role != "admin" and conv.user_id is not None and conv.user_id != user.id:
             raise HTTPException(404, "Диалог не найден")
         conversation_id = req.conversation_id
+        notebook_id = conv.notebook_id  # уже зафиксирован при создании
     else:
+        # Новый диалог. notebook_id из тела запроса; если не передан — дефолтный.
+        notebook_id = req.notebook_id
+        if notebook_id is not None:
+            nb = db.get_notebook(notebook_id)
+            if nb is None or (user.role != "admin" and nb.user_id != user.id):
+                raise HTTPException(404, "Ноутбук не найден")
+        else:
+            from api.notebooks import ensure_default_notebook
+            notebook_id = ensure_default_notebook(user).id
         title = req.message[:60]
-        conversation_id = db.create_conversation(title=title, user_id=user.id)
+        conversation_id = db.create_conversation(title=title, user_id=user.id, notebook_id=notebook_id)
 
     db.add_message(conversation_id, "user", req.message)
 
@@ -97,6 +109,7 @@ async def chat(req: ChatRequest, user: UserRow = Depends(require_user)) -> ChatR
         user_message=req.message,
         history=history,
         user_id=user.id,
+        notebook_id=notebook_id,
     )
     try:
         msg_id, answer, cited = await asyncio.shield(work)

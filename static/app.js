@@ -8,6 +8,8 @@ const state = {
     conversationId: null,
     conversations: [],
     documents: [],
+    notebooks: [],
+    notebookId: null,
     polling: new Set(),
     sending: false,
     user: null, // {id, email, role, is_active, ...}
@@ -151,11 +153,222 @@ async function api(path, opts = {}) {
 
 async function loadConversations() {
     try {
-        state.conversations = await api("/conversations");
+        const q = state.notebookId ? `?notebook_id=${state.notebookId}` : "";
+        state.conversations = await api("/conversations" + q);
         renderConversations();
     } catch (e) {
         toast("Не удалось загрузить чаты: " + e.message, "error");
     }
+}
+
+// ============== Notebooks ==============
+
+const LAST_NB_KEY = "rag.lastNotebookId";
+
+async function loadNotebooks() {
+    try {
+        state.notebooks = await api("/notebooks");
+        // Восстановим выбранный ноутбук: localStorage или первый
+        let savedId = null;
+        try { savedId = parseInt(localStorage.getItem(LAST_NB_KEY) || "0", 10) || null; } catch (_) {}
+        if (savedId && state.notebooks.some(n => n.id === savedId)) {
+            state.notebookId = savedId;
+        } else if (state.notebooks.length > 0) {
+            state.notebookId = state.notebooks[0].id;
+        } else {
+            state.notebookId = null;
+        }
+        renderNotebookSelector();
+    } catch (e) {
+        toast("Не удалось загрузить ноутбуки: " + e.message, "error");
+    }
+}
+
+function renderNotebookSelector() {
+    const cur = state.notebooks.find(n => n.id === state.notebookId);
+    document.getElementById("notebookName").textContent = cur ? cur.name : "Документы";
+
+    const list = document.getElementById("notebookList");
+    list.innerHTML = "";
+    for (const nb of state.notebooks) {
+        const item = document.createElement("div");
+        item.className = "notebook-item";
+        if (nb.id === state.notebookId) item.classList.add("active");
+        item.innerHTML = `
+            <span class="notebook-item-name" title="${escapeHtml(nb.name)}">${escapeHtml(nb.name)}</span>
+            <span class="notebook-item-count">${nb.document_count}</span>
+            <span class="notebook-item-actions">
+                <button data-action="rename" title="Переименовать">
+                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M11 4H4a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7"/><path d="M18.5 2.5a2.121 2.121 0 0 1 3 3L12 15l-4 1 1-4 9.5-9.5z"/></svg>
+                </button>
+                <button data-action="delete" title="Удалить">
+                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="3 6 5 6 21 6"/><path d="M19 6l-2 14a2 2 0 0 1-2 2H9a2 2 0 0 1-2-2L5 6"/></svg>
+                </button>
+            </span>
+        `;
+        item.addEventListener("click", e => {
+            const action = e.target.closest("[data-action]");
+            if (action) {
+                e.stopPropagation();
+                if (action.dataset.action === "rename") return renameNotebook(nb);
+                if (action.dataset.action === "delete") return deleteNotebook(nb);
+            }
+            switchNotebook(nb.id);
+            closeNotebookDropdown();
+        });
+        list.appendChild(item);
+    }
+}
+
+function rememberNotebook(id) {
+    try {
+        if (id) localStorage.setItem(LAST_NB_KEY, String(id));
+        else localStorage.removeItem(LAST_NB_KEY);
+    } catch (_) {}
+}
+
+async function switchNotebook(id) {
+    if (state.notebookId === id) return;
+    state.notebookId = id;
+    rememberNotebook(id);
+    state.conversationId = null;
+    rememberConversation(null);
+    renderNotebookSelector();
+    closeSourcePanel();
+    els.messages.innerHTML = "";
+    renderWelcome();
+    els.chatTitle.textContent = "Новый диалог";
+    els.chatSubtitle.textContent = "Задайте вопрос по документам ноутбука";
+    els.renameChatBtn.disabled = true;
+    els.deleteChatBtn.disabled = true;
+    await Promise.all([loadConversations(), loadDocuments()]);
+    // Открываем самый свежий чат в этом ноутбуке (если есть)
+    if (state.conversations.length > 0) {
+        await openConversation(state.conversations[0].id);
+    }
+}
+
+async function createNotebook() {
+    const name = prompt("Название нового ноутбука:");
+    if (!name || !name.trim()) return;
+    try {
+        const nb = await api("/notebooks", {
+            method: "POST",
+            body: JSON.stringify({ name: name.trim() }),
+        });
+        state.notebooks.push(nb);
+        await switchNotebook(nb.id);
+        toast(`Ноутбук «${nb.name}» создан`, "success");
+    } catch (e) {
+        toast("Ошибка: " + e.message, "error");
+    }
+}
+
+async function renameNotebook(nb) {
+    const name = prompt("Новое название:", nb.name);
+    if (!name || !name.trim() || name === nb.name) return;
+    try {
+        const updated = await api(`/notebooks/${nb.id}`, {
+            method: "PATCH",
+            body: JSON.stringify({ name: name.trim() }),
+        });
+        const idx = state.notebooks.findIndex(n => n.id === nb.id);
+        if (idx >= 0) state.notebooks[idx] = updated;
+        renderNotebookSelector();
+        toast("Переименовано", "success");
+    } catch (e) {
+        toast("Ошибка: " + e.message, "error");
+    }
+}
+
+async function deleteNotebook(nb) {
+    if (state.notebooks.length <= 1) {
+        toast("Нельзя удалить единственный ноутбук", "warning");
+        return;
+    }
+    if (!confirm(`Удалить ноутбук «${nb.name}»? Все документы (${nb.document_count}) и чаты (${nb.conversation_count}) внутри будут потеряны.`)) return;
+    try {
+        await api(`/notebooks/${nb.id}`, { method: "DELETE" });
+        state.notebooks = state.notebooks.filter(n => n.id !== nb.id);
+        if (state.notebookId === nb.id) {
+            await switchNotebook(state.notebooks[0].id);
+        } else {
+            renderNotebookSelector();
+        }
+        toast("Ноутбук удалён", "success");
+    } catch (e) {
+        toast("Ошибка: " + e.message, "error");
+    }
+}
+
+function toggleNotebookDropdown() {
+    const sel = document.getElementById("notebookSelector");
+    const dd = document.getElementById("notebookDropdown");
+    if (dd.hidden) {
+        dd.hidden = false;
+        sel.classList.add("open");
+    } else {
+        closeNotebookDropdown();
+    }
+}
+
+function closeNotebookDropdown() {
+    const sel = document.getElementById("notebookSelector");
+    const dd = document.getElementById("notebookDropdown");
+    dd.hidden = true;
+    sel.classList.remove("open");
+}
+
+// ============== Source viewer ==============
+
+function showSource(chunk) {
+    // Закрываем модалку, если была
+    els.modal.classList.add("hidden");
+
+    const loc = [
+        chunk.page_number ? `стр. ${chunk.page_number}` : null,
+        chunk.sheet_name ? `лист «${chunk.sheet_name}»` : null,
+        chunk.slide_number ? `слайд ${chunk.slide_number}` : null,
+    ].filter(Boolean).join(", ");
+
+    document.getElementById("sourceTitle").textContent = chunk.filename || "Источник";
+    document.getElementById("sourceLocation").textContent = loc || "";
+    document.getElementById("sourceSnippet").textContent = chunk.snippet || "";
+
+    const iframe = document.getElementById("sourceIframe");
+    const fallback = document.getElementById("sourceFallback");
+    const downloadLink = document.getElementById("sourceDownloadLink");
+    const fallbackText = document.getElementById("sourceFallbackText");
+
+    const ext = (chunk.filename || "").toLowerCase().split(".").pop();
+    const fileUrl = `/api/documents/${chunk.document_id}/file`;
+    downloadLink.href = fileUrl;
+    document.getElementById("sourceOpenInNewTab").onclick = () => window.open(fileUrl, "_blank");
+
+    if (ext === "pdf") {
+        // Открываем PDF в iframe на нужной странице. Native viewers Chrome/
+        // Firefox/Safari распознают #page=N. Это простое решение без bundling pdf.js.
+        const page = chunk.page_number ? `#page=${chunk.page_number}` : "";
+        iframe.style.display = "block";
+        fallback.hidden = true;
+        iframe.src = fileUrl + page;
+    } else {
+        iframe.style.display = "none";
+        iframe.src = "about:blank";
+        fallback.hidden = false;
+        const formatLabel = ext ? ext.toUpperCase() : "этот формат";
+        fallbackText.textContent = `Встроенный просмотр для ${formatLabel} недоступен — скачайте оригинал, чтобы увидеть полный документ.`;
+    }
+
+    document.getElementById("sourcePanel").classList.remove("hidden");
+}
+
+function closeSourcePanel() {
+    const panel = document.getElementById("sourcePanel");
+    if (!panel) return;
+    panel.classList.add("hidden");
+    const iframe = document.getElementById("sourceIframe");
+    if (iframe) iframe.src = "about:blank";  // освобождаем память от PDF
 }
 
 function renderConversations() {
@@ -293,7 +506,8 @@ function bindWelcomeHandlers() {
 
 async function loadDocuments() {
     try {
-        state.documents = await api("/documents");
+        const q = state.notebookId ? `?notebook_id=${state.notebookId}` : "";
+        state.documents = await api("/documents" + q);
         renderDocuments();
         updateDocsBadge();
         const ready = state.documents.filter(d => d.status === "ready").length;
@@ -404,6 +618,7 @@ async function uploadFiles(fileList) {
     toast(`Загружаю ${files.length} файл(ов)...`);
     const fd = new FormData();
     for (const f of files) fd.append("files", f, f.name);
+    if (state.notebookId) fd.append("notebook_id", String(state.notebookId));
     try {
         const res = await api("/documents", { method: "POST", body: fd });
         await loadDocuments();
@@ -496,7 +711,7 @@ function renderMessage(role, content, citedChunks = []) {
                 <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/></svg>
                 <span>${escapeHtml(c.filename)}${loc ? " · " + escapeHtml(loc) : ""}</span>
             `;
-            chip.addEventListener("click", () => showSnippet(c));
+            chip.addEventListener("click", () => showSource(c));
             list.appendChild(chip);
         }
         cited.appendChild(list);
@@ -561,7 +776,11 @@ async function sendMessage() {
         const res = await api("/chat", {
             method: "POST",
             headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({ message: text, conversation_id: state.conversationId }),
+            body: JSON.stringify({
+                message: text,
+                conversation_id: state.conversationId,
+                notebook_id: state.notebookId,
+            }),
         });
         thinking.remove();
         const isNew = !state.conversationId;
@@ -606,6 +825,30 @@ function updateCharCount() {
 function bindEvents() {
     els.newChatBtn.addEventListener("click", startNewChat);
     els.convSearch.addEventListener("input", renderConversations);
+
+    // Notebook selector
+    document.getElementById("notebookBtn").addEventListener("click", e => {
+        e.stopPropagation();
+        toggleNotebookDropdown();
+    });
+    document.getElementById("newNotebookBtn").addEventListener("click", e => {
+        e.stopPropagation();
+        closeNotebookDropdown();
+        createNotebook();
+    });
+    document.addEventListener("click", e => {
+        const sel = document.getElementById("notebookSelector");
+        if (sel && !sel.contains(e.target)) closeNotebookDropdown();
+    });
+
+    // Source panel
+    document.getElementById("sourceClose").addEventListener("click", closeSourcePanel);
+    document.addEventListener("keydown", e => {
+        if (e.key === "Escape") {
+            const panel = document.getElementById("sourcePanel");
+            if (panel && !panel.classList.contains("hidden")) closeSourcePanel();
+        }
+    });
 
     els.renameChatBtn.addEventListener("click", async () => {
         if (!state.conversationId) return;
@@ -825,7 +1068,11 @@ async function init() {
     const ok = await loadCurrentUser();
     if (!ok) return;
 
-    // Параллельно: чаты и документы
+    // Сначала загружаем ноутбуки — выбираем активный, потом подтягиваем
+    // чаты и документы уже scope'нутые на этот ноутбук.
+    await loadNotebooks();
+
+    // Параллельно: чаты и документы (фильтр по state.notebookId)
     await Promise.all([loadConversations(), loadDocuments()]);
 
     // Восстановить последний открытый чат. Логика приоритета:

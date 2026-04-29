@@ -18,6 +18,24 @@
     <div class="app">
         <!-- Левая колонка: список чатов -->
         <aside class="sidebar">
+            <!-- Notebook selector -->
+            <div class="notebook-selector" id="notebookSelector">
+                <button id="notebookBtn" class="notebook-btn">
+                    <svg class="nb-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M2 3h6a4 4 0 0 1 4 4v14a3 3 0 0 0-3-3H2z"/><path d="M22 3h-6a4 4 0 0 0-4 4v14a3 3 0 0 1 3-3h7z"/></svg>
+                    <span class="nb-name" id="notebookName">Документы</span>
+                    <svg class="nb-chevron" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="6 9 12 15 18 9"/></svg>
+                </button>
+                <div class="notebook-dropdown" id="notebookDropdown" hidden>
+                    <div class="notebook-list" id="notebookList"></div>
+                    <div class="notebook-actions">
+                        <button id="newNotebookBtn" class="notebook-action-btn">
+                            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg>
+                            Новый ноутбук
+                        </button>
+                    </div>
+                </div>
+            </div>
+
             <div class="sidebar-top">
                 <button id="newChatBtn" class="btn-new-chat">
                     <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg>
@@ -146,6 +164,33 @@
             <ul id="docList" class="doc-list"></ul>
         </aside>
     </div>
+
+    <!-- Боковая панель source viewer (PDF в iframe + сниппет цитаты) -->
+    <aside id="sourcePanel" class="source-panel hidden">
+        <div class="source-header">
+            <div class="source-title-block">
+                <h3 id="sourceTitle"></h3>
+                <span id="sourceLocation" class="source-location"></span>
+            </div>
+            <div class="source-actions">
+                <button id="sourceOpenInNewTab" class="icon-btn small" title="Открыть в новой вкладке">
+                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6"/><polyline points="15 3 21 3 21 9"/><line x1="10" y1="14" x2="21" y2="3"/></svg>
+                </button>
+                <button id="sourceClose" class="icon-btn small" title="Закрыть">
+                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>
+                </button>
+            </div>
+        </div>
+        <div class="source-snippet" id="sourceSnippet"></div>
+        <div class="source-viewer-wrap">
+            <iframe id="sourceIframe" class="source-iframe" title="Source preview"></iframe>
+            <div id="sourceFallback" class="source-fallback" hidden>
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/></svg>
+                <p id="sourceFallbackText">Этот формат не поддерживает встроенный просмотр.</p>
+                <a id="sourceDownloadLink" class="btn-secondary" target="_blank" rel="noopener">Скачать оригинал</a>
+            </div>
+        </div>
+    </aside>
 
     <!-- Модалка для просмотра чанка -->
     <div id="modal" class="modal hidden">

@@ -106,6 +106,19 @@ CREATE TABLE IF NOT EXISTS auth_audit (
 CREATE INDEX IF NOT EXISTS idx_audit_user ON auth_audit(user_id);
 CREATE INDEX IF NOT EXISTS idx_audit_event ON auth_audit(event);
 CREATE INDEX IF NOT EXISTS idx_audit_created ON auth_audit(created_at);
+
+-- Ноутбуки (workspaces). У каждого пользователя несколько ноутбуков, в каждом
+-- свой набор документов и диалогов. Поиск/RAG ограничен текущим ноутбуком.
+CREATE TABLE IF NOT EXISTS notebooks (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    user_id INTEGER NOT NULL,
+    name TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
+);
+
+CREATE INDEX IF NOT EXISTS idx_notebooks_user ON notebooks(user_id);
 """
 
 # Дополнительные миграции для обратной совместимости с уже существующими БД
@@ -116,6 +129,10 @@ MIGRATIONS = [
      "ALTER TABLE conversations ADD COLUMN user_id INTEGER"),
     ("SELECT uploaded_by FROM documents LIMIT 1",
      "ALTER TABLE documents ADD COLUMN uploaded_by INTEGER"),
+    ("SELECT notebook_id FROM documents LIMIT 1",
+     "ALTER TABLE documents ADD COLUMN notebook_id INTEGER"),
+    ("SELECT notebook_id FROM conversations LIMIT 1",
+     "ALTER TABLE conversations ADD COLUMN notebook_id INTEGER"),
 ]
 
 
@@ -131,6 +148,16 @@ class DocumentRow:
     error_message: Optional[str]
     chunk_count: int
     uploaded_by: Optional[int] = None
+    notebook_id: Optional[int] = None
+
+
+@dataclass
+class NotebookRow:
+    id: int
+    user_id: int
+    name: str
+    created_at: str
+    updated_at: str
 
 
 @dataclass
@@ -151,6 +178,8 @@ class ConversationRow:
     title: Optional[str]
     created_at: str
     updated_at: str
+    user_id: Optional[int] = None
+    notebook_id: Optional[int] = None
 
 
 @dataclass
@@ -255,13 +284,14 @@ class Database:
         file_type: str,
         file_size: int,
         uploaded_by: Optional[int] = None,
+        notebook_id: Optional[int] = None,
     ) -> int:
         with self.cursor() as cur:
             cur.execute(
                 """INSERT INTO documents
-                   (filename, file_path, file_type, file_size, upload_date, status, uploaded_by)
-                   VALUES (?, ?, ?, ?, ?, 'pending', ?)""",
-                (filename, file_path, file_type, file_size, _now(), uploaded_by),
+                   (filename, file_path, file_type, file_size, upload_date, status, uploaded_by, notebook_id)
+                   VALUES (?, ?, ?, ?, ?, 'pending', ?, ?)""",
+                (filename, file_path, file_type, file_size, _now(), uploaded_by, notebook_id),
             )
             return int(cur.lastrowid)
 
@@ -290,28 +320,42 @@ class Database:
             row = cur.fetchone()
             return _row_to_document(row) if row else None
 
-    def list_documents(self, owner_user_id: Optional[int] = None) -> list[DocumentRow]:
-        """Если owner_user_id задан — только документы этого пользователя
-        (по uploaded_by). Иначе — все."""
+    def list_documents(
+        self,
+        owner_user_id: Optional[int] = None,
+        notebook_id: Optional[int] = None,
+    ) -> list[DocumentRow]:
+        """Фильтр по владельцу (uploaded_by) и/или по ноутбуку."""
+        clauses = []
+        params: list = []
+        if owner_user_id is not None:
+            clauses.append("uploaded_by=?")
+            params.append(owner_user_id)
+        if notebook_id is not None:
+            clauses.append("notebook_id=?")
+            params.append(notebook_id)
+        where = ("WHERE " + " AND ".join(clauses)) if clauses else ""
+        sql = f"SELECT * FROM documents {where} ORDER BY upload_date DESC"
         with self.cursor() as cur:
-            if owner_user_id is not None:
-                cur.execute(
-                    "SELECT * FROM documents WHERE uploaded_by=? ORDER BY upload_date DESC",
-                    (owner_user_id,),
-                )
-            else:
-                cur.execute("SELECT * FROM documents ORDER BY upload_date DESC")
+            cur.execute(sql, params)
             return [_row_to_document(r) for r in cur.fetchall()]
 
-    def count_documents(self, owner_user_id: Optional[int] = None) -> int:
+    def count_documents(
+        self,
+        owner_user_id: Optional[int] = None,
+        notebook_id: Optional[int] = None,
+    ) -> int:
+        clauses = []
+        params: list = []
+        if owner_user_id is not None:
+            clauses.append("uploaded_by=?")
+            params.append(owner_user_id)
+        if notebook_id is not None:
+            clauses.append("notebook_id=?")
+            params.append(notebook_id)
+        where = ("WHERE " + " AND ".join(clauses)) if clauses else ""
         with self.cursor() as cur:
-            if owner_user_id is not None:
-                cur.execute(
-                    "SELECT COUNT(*) AS c FROM documents WHERE uploaded_by=?",
-                    (owner_user_id,),
-                )
-            else:
-                cur.execute("SELECT COUNT(*) AS c FROM documents")
+            cur.execute(f"SELECT COUNT(*) AS c FROM documents {where}", params)
             return int(cur.fetchone()["c"])
 
     def get_chunk_owners(self, chunk_ids: list[int]) -> dict[int, Optional[int]]:
@@ -327,6 +371,20 @@ class Database:
                 chunk_ids,
             )
             return {int(r["id"]): r["uploaded_by"] for r in cur.fetchall()}
+
+    def get_chunk_notebooks(self, chunk_ids: list[int]) -> dict[int, Optional[int]]:
+        """Возвращает {chunk_id: notebook_id} для фильтрации поиска по ноутбуку."""
+        if not chunk_ids:
+            return {}
+        placeholders = ",".join("?" * len(chunk_ids))
+        with self.cursor() as cur:
+            cur.execute(
+                f"""SELECT c.id, d.notebook_id
+                    FROM chunks c JOIN documents d ON c.document_id = d.id
+                    WHERE c.id IN ({placeholders})""",
+                chunk_ids,
+            )
+            return {int(r["id"]): r["notebook_id"] for r in cur.fetchall()}
 
     def reset_processing_at_startup(self) -> int:
         """Все documents в статусе 'pending'/'processing' остались от прошлого
@@ -388,24 +446,38 @@ class Database:
 
     # --- conversations / messages ---
 
-    def create_conversation(self, title: Optional[str] = None, user_id: Optional[int] = None) -> int:
+    def create_conversation(
+        self,
+        title: Optional[str] = None,
+        user_id: Optional[int] = None,
+        notebook_id: Optional[int] = None,
+    ) -> int:
         now = _now()
         with self.cursor() as cur:
             cur.execute(
-                "INSERT INTO conversations (title, created_at, updated_at, user_id) VALUES (?, ?, ?, ?)",
-                (title, now, now, user_id),
+                """INSERT INTO conversations (title, created_at, updated_at, user_id, notebook_id)
+                   VALUES (?, ?, ?, ?, ?)""",
+                (title, now, now, user_id, notebook_id),
             )
             return int(cur.lastrowid)
 
-    def list_conversations(self, user_id: Optional[int] = None) -> list[ConversationRow]:
+    def list_conversations(
+        self,
+        user_id: Optional[int] = None,
+        notebook_id: Optional[int] = None,
+    ) -> list[ConversationRow]:
+        clauses = []
+        params: list = []
+        if user_id is not None:
+            clauses.append("user_id=?")
+            params.append(user_id)
+        if notebook_id is not None:
+            clauses.append("notebook_id=?")
+            params.append(notebook_id)
+        where = ("WHERE " + " AND ".join(clauses)) if clauses else ""
+        sql = f"SELECT * FROM conversations {where} ORDER BY updated_at DESC"
         with self.cursor() as cur:
-            if user_id is not None:
-                cur.execute(
-                    "SELECT * FROM conversations WHERE user_id=? ORDER BY updated_at DESC",
-                    (user_id,),
-                )
-            else:
-                cur.execute("SELECT * FROM conversations ORDER BY updated_at DESC")
+            cur.execute(sql, params)
             return [_row_to_conversation(r) for r in cur.fetchall()]
 
     def get_conversation(self, conversation_id: int) -> Optional[ConversationRow]:
@@ -463,6 +535,74 @@ class Database:
                     (conversation_id,),
                 )
             return [_row_to_message(r) for r in cur.fetchall()]
+
+    # ===== notebooks =====
+
+    def create_notebook(self, user_id: int, name: str) -> int:
+        now = _now()
+        with self.cursor() as cur:
+            cur.execute(
+                "INSERT INTO notebooks (user_id, name, created_at, updated_at) VALUES (?, ?, ?, ?)",
+                (user_id, name.strip()[:120] or "Без названия", now, now),
+            )
+            return int(cur.lastrowid)
+
+    def list_notebooks(self, user_id: int) -> list[NotebookRow]:
+        with self.cursor() as cur:
+            cur.execute(
+                "SELECT * FROM notebooks WHERE user_id=? ORDER BY created_at ASC",
+                (user_id,),
+            )
+            return [_row_to_notebook(r) for r in cur.fetchall()]
+
+    def get_notebook(self, notebook_id: int) -> Optional[NotebookRow]:
+        with self.cursor() as cur:
+            cur.execute("SELECT * FROM notebooks WHERE id=?", (notebook_id,))
+            row = cur.fetchone()
+            return _row_to_notebook(row) if row else None
+
+    def rename_notebook(self, notebook_id: int, name: str) -> None:
+        with self.cursor() as cur:
+            cur.execute(
+                "UPDATE notebooks SET name=?, updated_at=? WHERE id=?",
+                (name.strip()[:120] or "Без названия", _now(), notebook_id),
+            )
+
+    def delete_notebook(self, notebook_id: int) -> list[int]:
+        """Удаляет ноутбук со всеми документами и диалогами. Возвращает список
+        chunk_ids для последующей очистки FAISS."""
+        with self.cursor() as cur:
+            cur.execute(
+                """SELECT c.id FROM chunks c JOIN documents d ON c.document_id=d.id
+                   WHERE d.notebook_id=?""",
+                (notebook_id,),
+            )
+            chunk_ids = [int(r["id"]) for r in cur.fetchall()]
+            # Удаляем документы (CASCADE снимет chunks), диалоги, потом сам ноутбук
+            cur.execute("DELETE FROM documents WHERE notebook_id=?", (notebook_id,))
+            cur.execute("DELETE FROM conversations WHERE notebook_id=?", (notebook_id,))
+            cur.execute("DELETE FROM notebooks WHERE id=?", (notebook_id,))
+            return chunk_ids
+
+    def list_documents_in_notebook(self, notebook_id: int) -> list[DocumentRow]:
+        return self.list_documents(notebook_id=notebook_id)
+
+    def assign_orphans_to_notebook(self, user_id: int, notebook_id: int) -> tuple[int, int]:
+        """Один раз привязывает старые документы и диалоги юзера без notebook_id
+        к указанному ноутбуку. Используется при первом создании дефолтного
+        ноутбука для существующих юзеров."""
+        with self.cursor() as cur:
+            cur.execute(
+                "UPDATE documents SET notebook_id=? WHERE uploaded_by=? AND notebook_id IS NULL",
+                (notebook_id, user_id),
+            )
+            docs = cur.rowcount
+            cur.execute(
+                "UPDATE conversations SET notebook_id=? WHERE user_id=? AND notebook_id IS NULL",
+                (notebook_id, user_id),
+            )
+            convs = cur.rowcount
+            return docs, convs
 
     # ===== users =====
 
@@ -636,6 +776,7 @@ class Database:
 def _row_to_document(row: sqlite3.Row) -> DocumentRow:
     keys = row.keys() if hasattr(row, "keys") else []
     uploaded_by = row["uploaded_by"] if "uploaded_by" in keys else None
+    notebook_id = row["notebook_id"] if "notebook_id" in keys else None
     return DocumentRow(
         id=int(row["id"]),
         filename=str(row["filename"]),
@@ -647,6 +788,7 @@ def _row_to_document(row: sqlite3.Row) -> DocumentRow:
         error_message=row["error_message"],
         chunk_count=int(row["chunk_count"] or 0),
         uploaded_by=uploaded_by,
+        notebook_id=notebook_id,
     )
 
 
@@ -670,9 +812,24 @@ def _row_to_chunk(row: sqlite3.Row) -> ChunkRow:
 
 
 def _row_to_conversation(row: sqlite3.Row) -> ConversationRow:
+    keys = row.keys() if hasattr(row, "keys") else []
+    user_id = row["user_id"] if "user_id" in keys else None
+    notebook_id = row["notebook_id"] if "notebook_id" in keys else None
     return ConversationRow(
         id=int(row["id"]),
         title=row["title"],
+        created_at=str(row["created_at"]),
+        updated_at=str(row["updated_at"]),
+        user_id=user_id,
+        notebook_id=notebook_id,
+    )
+
+
+def _row_to_notebook(row: sqlite3.Row) -> NotebookRow:
+    return NotebookRow(
+        id=int(row["id"]),
+        user_id=int(row["user_id"]),
+        name=str(row["name"]),
         created_at=str(row["created_at"]),
         updated_at=str(row["updated_at"]),
     )

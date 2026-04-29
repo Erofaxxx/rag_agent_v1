@@ -20,9 +20,10 @@ log = logging.getLogger(__name__)
 _thread_local = threading.local()
 
 
-def _reset_thread_state(user_id: Optional[int]) -> None:
+def _reset_thread_state(user_id: Optional[int], notebook_id: Optional[int] = None) -> None:
     _thread_local.hits = []
     _thread_local.user_id = user_id
+    _thread_local.notebook_id = notebook_id
 
 
 def _get_hits() -> list[SearchHit]:
@@ -31,6 +32,10 @@ def _get_hits() -> list[SearchHit]:
 
 def _get_user_id() -> Optional[int]:
     return getattr(_thread_local, "user_id", None)
+
+
+def _get_notebook_id() -> Optional[int]:
+    return getattr(_thread_local, "notebook_id", None)
 
 
 def _add_hits(hits: list[SearchHit]) -> None:
@@ -78,7 +83,13 @@ def search_documents(query: str) -> str:
     """
     log.info("[tool] search_documents(%r)", query)
     user_id = _get_user_id()
-    hits = search_service.search(query, k=settings.SEARCH_TOP_K, owner_user_id=user_id)
+    notebook_id = _get_notebook_id()
+    hits = search_service.search(
+        query,
+        k=settings.SEARCH_TOP_K,
+        owner_user_id=user_id,
+        notebook_id=notebook_id,
+    )
     _add_hits(hits)
     return _format_hits_for_llm(hits)
 
@@ -146,16 +157,18 @@ def answer_question(
     question: str,
     history: Optional[list[dict[str, str]]] = None,
     user_id: Optional[int] = None,
+    notebook_id: Optional[int] = None,
 ) -> dict[str, Any]:
     """Главный вход. Возвращает {'answer': str, 'cited_chunks': [...]}.
 
-    user_id используется внутри search_documents tool для изоляции корпуса:
-    юзер видит только свои документы, админ — все. Передаётся через
-    thread-local, потому что tool-функция не принимает контекст напрямую."""
+    user_id и notebook_id используются внутри search_documents tool для
+    изоляции корпуса: юзер видит только свои документы из указанного ноутбука.
+    Передаётся через thread-local, потому что tool-функция не принимает
+    контекст напрямую."""
     history = history or []
     history = _truncate_history(history, settings.MAX_HISTORY_MESSAGES)
 
-    _reset_thread_state(user_id)
+    _reset_thread_state(user_id, notebook_id)
     agent = get_agent()
 
     messages = _to_lc_messages(history) + [HumanMessage(content=question)]

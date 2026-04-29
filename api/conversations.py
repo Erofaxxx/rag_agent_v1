@@ -14,6 +14,7 @@ class ConversationOut(BaseModel):
     title: Optional[str]
     created_at: str
     updated_at: str
+    notebook_id: Optional[int] = None
 
 
 class MessageOut(BaseModel):
@@ -40,16 +41,28 @@ def _can_access(conv, user: UserRow) -> bool:
 
 
 @router.get("", response_model=list[ConversationOut])
-def list_conversations(user: UserRow = Depends(require_user)) -> list[ConversationOut]:
+def list_conversations(
+    notebook_id: Optional[int] = None,
+    user: UserRow = Depends(require_user),
+) -> list[ConversationOut]:
     user_filter = None if user.role == "admin" else user.id
-    items = db.list_conversations(user_id=user_filter)
-    # Для legacy-чатов без user_id — пользователь их тоже видит
-    if user.role != "admin":
-        items += [c for c in db.list_conversations() if c.user_id is None and c not in items]
+    if notebook_id is not None and user.role != "admin":
+        nb = db.get_notebook(notebook_id)
+        if nb is None or nb.user_id != user.id:
+            raise HTTPException(404, "Ноутбук не найден")
+    items = db.list_conversations(user_id=user_filter, notebook_id=notebook_id)
     return [
-        ConversationOut(id=c.id, title=c.title, created_at=c.created_at, updated_at=c.updated_at)
+        ConversationOut(
+            id=c.id, title=c.title,
+            created_at=c.created_at, updated_at=c.updated_at,
+            notebook_id=c.notebook_id,
+        )
         for c in items
     ]
+
+
+class CreateConversationIn(BaseModel):
+    notebook_id: Optional[int] = None
 
 
 @router.post(
@@ -58,11 +71,26 @@ def list_conversations(user: UserRow = Depends(require_user)) -> list[Conversati
     status_code=status.HTTP_201_CREATED,
     dependencies=[Depends(csrf_check)],
 )
-def create_conversation(user: UserRow = Depends(require_user)) -> ConversationOut:
-    cid = db.create_conversation(title=None, user_id=user.id)
+def create_conversation(
+    payload: CreateConversationIn = CreateConversationIn(),
+    user: UserRow = Depends(require_user),
+) -> ConversationOut:
+    notebook_id = payload.notebook_id
+    if notebook_id is not None and user.role != "admin":
+        nb = db.get_notebook(notebook_id)
+        if nb is None or nb.user_id != user.id:
+            raise HTTPException(404, "Ноутбук не найден")
+    if notebook_id is None:
+        from api.notebooks import ensure_default_notebook
+        notebook_id = ensure_default_notebook(user).id
+    cid = db.create_conversation(title=None, user_id=user.id, notebook_id=notebook_id)
     c = db.get_conversation(cid)
     assert c is not None
-    return ConversationOut(id=c.id, title=c.title, created_at=c.created_at, updated_at=c.updated_at)
+    return ConversationOut(
+        id=c.id, title=c.title,
+        created_at=c.created_at, updated_at=c.updated_at,
+        notebook_id=c.notebook_id,
+    )
 
 
 @router.get("/{conversation_id}", response_model=ConversationDetail)

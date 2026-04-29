@@ -5,7 +5,8 @@ import time
 from pathlib import Path
 from typing import Optional
 
-from fastapi import APIRouter, BackgroundTasks, Depends, File, HTTPException, UploadFile, status
+from fastapi import APIRouter, BackgroundTasks, Depends, File, Form, HTTPException, UploadFile, status
+from fastapi.responses import FileResponse
 from pydantic import BaseModel
 
 from auth.dependencies import csrf_check, require_admin, require_user
@@ -130,9 +131,17 @@ def _can_access(doc, user: UserRow) -> bool:
 
 
 @router.get("", response_model=list[DocumentOut])
-def list_documents(user: UserRow = Depends(require_user)) -> list[DocumentOut]:
+def list_documents(
+    notebook_id: Optional[int] = None,
+    user: UserRow = Depends(require_user),
+) -> list[DocumentOut]:
     owner = None if user.role == "admin" else user.id
-    return [_to_out(d) for d in db.list_documents(owner_user_id=owner)]
+    # Если фильтр по notebook задан, проверим, что юзер имеет к нему доступ
+    if notebook_id is not None and user.role != "admin":
+        nb = db.get_notebook(notebook_id)
+        if nb is None or nb.user_id != user.id:
+            raise HTTPException(404, "Ноутбук не найден")
+    return [_to_out(d) for d in db.list_documents(owner_user_id=owner, notebook_id=notebook_id)]
 
 
 @router.get("/{document_id}", response_model=DocumentOut)
@@ -151,6 +160,46 @@ def get_document_status(document_id: int, user: UserRow = Depends(require_user))
     return _to_out(doc)
 
 
+@router.get("/{document_id}/file")
+def get_document_file(document_id: int, user: UserRow = Depends(require_user)):
+    """Отдаёт оригинальный файл для просмотра (PDF в iframe для source highlights).
+    Доступ — только владельцу документа или админу. Файл должен существовать
+    на диске (KEEP_ORIGINAL_FILES=true)."""
+    doc = db.get_document(document_id)
+    if not doc or not _can_access(doc, user):
+        raise HTTPException(404, "Документ не найден")
+    if not doc.file_path:
+        raise HTTPException(404, "Оригинал не сохранён")
+    p = Path(doc.file_path)
+    if not p.exists():
+        raise HTTPException(404, "Файл не найден на диске")
+    # Безопасность: не отдадим файл за пределами uploads_path
+    if not str(p.resolve()).startswith(str(settings.uploads_path.resolve())):
+        raise HTTPException(403, "Доступ запрещён")
+
+    media_types = {
+        "pdf": "application/pdf",
+        "docx": "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+        "doc": "application/msword",
+        "xlsx": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        "xls": "application/vnd.ms-excel",
+        "pptx": "application/vnd.openxmlformats-officedocument.presentationml.presentation",
+        "txt": "text/plain; charset=utf-8",
+        "md": "text/markdown; charset=utf-8",
+        "csv": "text/csv; charset=utf-8",
+    }
+    return FileResponse(
+        path=str(p),
+        media_type=media_types.get(doc.file_type, "application/octet-stream"),
+        filename=doc.filename,
+        headers={
+            # Inline для PDF чтобы открывалось в iframe, а не предлагало скачать
+            "Content-Disposition": f'inline; filename="{doc.filename}"',
+            "X-Frame-Options": "SAMEORIGIN",  # переопределяем глобальный DENY
+        },
+    )
+
+
 @router.post(
     "",
     response_model=UploadResponse,
@@ -160,8 +209,20 @@ def get_document_status(document_id: int, user: UserRow = Depends(require_user))
 async def upload_documents(
     background: BackgroundTasks,
     files: list[UploadFile] = File(...),
+    notebook_id: Optional[int] = Form(None),
     actor: UserRow = Depends(require_user),
 ) -> UploadResponse:
+    # Если notebook_id не передан — кладём в дефолтный ноутбук пользователя
+    # (создаётся автоматически при первом обращении к /api/notebooks).
+    from api.notebooks import ensure_default_notebook
+    if notebook_id is None:
+        nb = ensure_default_notebook(actor)
+        notebook_id = nb.id
+    else:
+        nb = db.get_notebook(notebook_id)
+        if nb is None or (actor.role != "admin" and nb.user_id != actor.id):
+            raise HTTPException(404, "Ноутбук не найден")
+
     # Лимит — per-user (не глобальный), чтобы один юзер не блокировал других
     own_count = db.count_documents(owner_user_id=actor.id) if actor.role != "admin" else db.count_documents()
     if own_count + len(files) > settings.MAX_DOCUMENTS:
@@ -211,6 +272,7 @@ async def upload_documents(
                 file_type=file_type,
                 file_size=file_size,
                 uploaded_by=actor.id,
+                notebook_id=notebook_id,
             )
 
             target_dir = settings.uploads_path / str(doc_id)
