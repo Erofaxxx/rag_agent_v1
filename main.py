@@ -88,6 +88,16 @@ async def lifespan(app: FastAPI):
     log.info("Data dir: %s", settings.data_path)
     bootstrap_admin()
     db.cleanup_expired_sessions()
+    # Watchdog: BackgroundTasks не переживают рестарт сервера. Любой документ,
+    # который остался в processing/pending — это «зомби» с прошлого запуска.
+    # Помечаем error, чтобы юзер увидел и мог перезалить.
+    stuck = db.reset_processing_at_startup()
+    if stuck > 0:
+        log.warning(
+            "Watchdog: %d документ(а/ов) висели в processing/pending после "
+            "прошлого запуска — переведены в error",
+            stuck,
+        )
     faiss_index.load_from_disk()
     if os.environ.get("PRELOAD_EMBEDDINGS", "1") == "1":
         # Для bge тут происходит реальная загрузка ~2 GB модели в RAM.

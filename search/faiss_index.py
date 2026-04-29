@@ -153,13 +153,27 @@ class SearchService:
             self._bm25 = None
             self._bm25_ids = []
 
-    def search(self, query: str, k: Optional[int] = None) -> list[SearchHit]:
+    def search(
+        self,
+        query: str,
+        k: Optional[int] = None,
+        owner_user_id: Optional[int] = None,
+    ) -> list[SearchHit]:
+        """Векторный поиск с опциональной изоляцией по владельцу документов.
+
+        Если задан owner_user_id, возвращаются только чанки документов, которые
+        загрузил этот пользователь. Это критично для multi-user изоляции.
+        """
         k = k or settings.SEARCH_TOP_K
         if not query.strip():
             return []
 
+        # Фильтрация по owner — over-fetch'аем кратно больше из FAISS, чтобы
+        # после фильтрации осталось k. Для 5000 векторов это всё ещё мс.
+        over_fetch = max(k * 6, 30) if owner_user_id is not None else max(k, 15)
+
         q_vec = embedding_service.encode_query(query)
-        dense_hits = faiss_index.search(q_vec, k=max(k, 15))
+        dense_hits = faiss_index.search(q_vec, k=over_fetch)
         scored: dict[int, float] = {}
         ranked_dense = [cid for cid, _ in dense_hits]
         for rank, cid in enumerate(ranked_dense):
@@ -170,12 +184,25 @@ class SearchService:
             if self._bm25 is not None and self._bm25_ids:
                 tokens = query.lower().split()
                 scores = self._bm25.get_scores(tokens)
-                top_idx = np.argsort(scores)[::-1][: max(k, 15)]
+                top_idx = np.argsort(scores)[::-1][:over_fetch]
                 ranked_bm = [self._bm25_ids[i] for i in top_idx if scores[i] > 0]
                 for rank, cid in enumerate(ranked_bm):
                     scored[cid] = scored.get(cid, 0.0) + 1.0 / (60 + rank + 1)
 
-        ordered_ids = sorted(scored.keys(), key=lambda i: scored[i], reverse=True)[:k]
+        ordered_ids = sorted(scored.keys(), key=lambda i: scored[i], reverse=True)
+        if not ordered_ids:
+            return []
+
+        # Фильтр по владельцу — на уровне chunk_id'ов из БД, чтобы один SQL JOIN
+        # вместо N round-trips
+        if owner_user_id is not None:
+            owners = db.get_chunk_owners(ordered_ids)
+            ordered_ids = [
+                cid for cid in ordered_ids
+                if owners.get(cid) == owner_user_id
+            ]
+
+        ordered_ids = ordered_ids[:k]
         if not ordered_ids:
             return []
 

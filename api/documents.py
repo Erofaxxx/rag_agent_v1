@@ -110,23 +110,31 @@ def _process_document(document_id: int) -> None:
         db.update_document_status(document_id, "error", error_message=str(e))
 
 
+def _can_access(doc, user: UserRow) -> bool:
+    """Админ — все. Юзер — только свои (по uploaded_by)."""
+    if user.role == "admin":
+        return True
+    return doc.uploaded_by == user.id
+
+
 @router.get("", response_model=list[DocumentOut])
-def list_documents(_user: UserRow = Depends(require_user)) -> list[DocumentOut]:
-    return [_to_out(d) for d in db.list_documents()]
+def list_documents(user: UserRow = Depends(require_user)) -> list[DocumentOut]:
+    owner = None if user.role == "admin" else user.id
+    return [_to_out(d) for d in db.list_documents(owner_user_id=owner)]
 
 
 @router.get("/{document_id}", response_model=DocumentOut)
-def get_document(document_id: int, _user: UserRow = Depends(require_user)) -> DocumentOut:
+def get_document(document_id: int, user: UserRow = Depends(require_user)) -> DocumentOut:
     doc = db.get_document(document_id)
-    if not doc:
+    if not doc or not _can_access(doc, user):
         raise HTTPException(404, "Документ не найден")
     return _to_out(doc)
 
 
 @router.get("/{document_id}/status", response_model=DocumentOut)
-def get_document_status(document_id: int, _user: UserRow = Depends(require_user)) -> DocumentOut:
+def get_document_status(document_id: int, user: UserRow = Depends(require_user)) -> DocumentOut:
     doc = db.get_document(document_id)
-    if not doc:
+    if not doc or not _can_access(doc, user):
         raise HTTPException(404, "Документ не найден")
     return _to_out(doc)
 
@@ -140,9 +148,11 @@ def get_document_status(document_id: int, _user: UserRow = Depends(require_user)
 async def upload_documents(
     background: BackgroundTasks,
     files: list[UploadFile] = File(...),
-    actor: UserRow = Depends(require_admin),
+    actor: UserRow = Depends(require_user),
 ) -> UploadResponse:
-    if db.count_documents() + len(files) > settings.MAX_DOCUMENTS:
+    # Лимит — per-user (не глобальный), чтобы один юзер не блокировал других
+    own_count = db.count_documents(owner_user_id=actor.id) if actor.role != "admin" else db.count_documents()
+    if own_count + len(files) > settings.MAX_DOCUMENTS:
         raise HTTPException(
             400,
             f"Превышен лимит документов ({settings.MAX_DOCUMENTS})",
@@ -221,15 +231,26 @@ async def upload_documents(
     status_code=status.HTTP_204_NO_CONTENT,
     dependencies=[Depends(csrf_check)],
 )
-def delete_document(document_id: int, _actor: UserRow = Depends(require_admin)) -> None:
+def delete_document(document_id: int, user: UserRow = Depends(require_user)) -> None:
+    """Удаление документа — может удалить только владелец (uploaded_by) или админ.
+
+    Что чистится синхронно:
+    - SQLite: документ + все его чанки (CASCADE)
+    - FAISS: векторы по chunk_ids (remove_ids)
+    - Файловая система: data/uploads/{document_id}/
+
+    В Yandex AI Studio мы НИЧЕГО не храним — только дёргаем embedding API.
+    Удалять там нечего.
+    """
     doc = db.get_document(document_id)
-    if not doc:
+    if not doc or not _can_access(doc, user):
         raise HTTPException(404, "Документ не найден")
     chunk_ids = db.delete_document(document_id)
     if chunk_ids:
         faiss_index.remove(chunk_ids)
         faiss_index.persist()
         search_service.invalidate_bm25()
+        log.info("Удалён документ %s (%s), чанков: %d", document_id, doc.filename, len(chunk_ids))
     try:
         target_dir = Path(doc.file_path).parent
         if target_dir.exists() and str(target_dir).startswith(str(settings.uploads_path)):

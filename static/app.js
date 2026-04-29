@@ -224,6 +224,7 @@ async function openConversation(id) {
     try {
         const conv = await api(`/conversations/${id}`);
         state.conversationId = conv.id;
+        rememberConversation(conv.id);
         els.chatTitle.textContent = conv.title || `Диалог #${conv.id}`;
         els.chatSubtitle.textContent = `${conv.messages.length} сообщений · обновлён ${formatDate(conv.updated_at)}`;
         els.renameChatBtn.disabled = false;
@@ -242,6 +243,7 @@ async function openConversation(id) {
 
 function startNewChat() {
     state.conversationId = null;
+    rememberConversation(null);
     els.chatTitle.textContent = "Новый диалог";
     els.chatSubtitle.textContent = "Задайте вопрос по загруженным документам";
     els.renameChatBtn.disabled = true;
@@ -393,7 +395,7 @@ async function pollDocument(id) {
 }
 
 async function uploadFiles(fileList) {
-    const allowed = /\.(pdf|docx|xlsx|xlsm|pptx)$/i;
+    const allowed = /\.(pdf|docx?|xlsx?|xlsm|pptx|txt|md|markdown|csv)$/i;
     const files = Array.from(fileList).filter(f => allowed.test(f.name));
     if (!files.length) {
         toast("Нет поддерживаемых файлов (PDF/DOCX/XLSX/PPTX)", "warning");
@@ -564,6 +566,7 @@ async function sendMessage() {
         thinking.remove();
         const isNew = !state.conversationId;
         state.conversationId = res.conversation_id;
+        rememberConversation(res.conversation_id);
         renderMessage("assistant", res.answer, res.cited_chunks);
         scrollMessagesToBottom();
         if (isNew) {
@@ -667,31 +670,44 @@ function bindEvents() {
         if (files.length) await uploadFiles(files);
     });
 
-    // глобальный drag&drop по всему окну — сразу в загрузку
+    // глобальный drag&drop по всему окну — full-screen overlay + загрузка
+    const overlay = document.getElementById("dragOverlay");
     let dragCounter = 0;
+
+    function isFileDrag(e) {
+        // Игнорируем перетаскивание текста/ссылок внутри страницы
+        return e.dataTransfer && Array.from(e.dataTransfer.types || []).includes("Files");
+    }
+
     window.addEventListener("dragenter", e => {
+        if (!isFileDrag(e)) return;
         e.preventDefault();
         dragCounter++;
         if (dragCounter === 1) {
-            openDocsPanel();
-            els.dropZone.classList.add("dragging");
+            overlay.classList.remove("hidden");
         }
     });
     window.addEventListener("dragleave", e => {
+        if (!isFileDrag(e)) return;
         dragCounter--;
         if (dragCounter <= 0) {
             dragCounter = 0;
-            els.dropZone.classList.remove("dragging");
+            overlay.classList.add("hidden");
         }
     });
-    window.addEventListener("dragover", e => e.preventDefault());
+    window.addEventListener("dragover", e => {
+        if (isFileDrag(e)) e.preventDefault();
+    });
     window.addEventListener("drop", async e => {
+        if (!isFileDrag(e)) return;
         e.preventDefault();
         dragCounter = 0;
-        els.dropZone.classList.remove("dragging");
-        if (e.target.closest(".drop-zone")) return;
+        overlay.classList.add("hidden");
         const files = await getFilesFromDataTransfer(e.dataTransfer);
-        if (files.length) await uploadFiles(files);
+        if (!files.length) return;
+        // Если юзер не админ-only режим, открываем панель чтобы видно было прогресс
+        openDocsPanel();
+        await uploadFiles(files);
     });
 
     // modal
@@ -774,6 +790,24 @@ function bindUserMenu() {
     });
 }
 
+const LAST_CONV_KEY = "rag.lastConversationId";
+
+function rememberConversation(id) {
+    try {
+        if (id) localStorage.setItem(LAST_CONV_KEY, String(id));
+        else localStorage.removeItem(LAST_CONV_KEY);
+    } catch (_) {}
+}
+
+function recallConversation() {
+    try {
+        const v = localStorage.getItem(LAST_CONV_KEY);
+        return v ? Number(v) : null;
+    } catch (_) {
+        return null;
+    }
+}
+
 async function init() {
     bindEvents();
     bindUserMenu();
@@ -787,6 +821,14 @@ async function init() {
 
     // Параллельно: чаты и документы
     await Promise.all([loadConversations(), loadDocuments()]);
+
+    // Восстановить последний открытый чат: если юзер закрыл вкладку посреди
+    // диалога с агентом, ответ всё равно дописался в БД (asyncio.shield на
+    // бэкенде), и здесь мы откроем тот же чат и подтянем последнее сообщение.
+    const lastId = recallConversation();
+    if (lastId && state.conversations.some(c => c.id === lastId)) {
+        await openConversation(lastId);
+    }
 
     // Каждые 60s обновляем статусы документов
     setInterval(loadDocuments, 60000);

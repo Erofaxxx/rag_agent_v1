@@ -130,6 +130,7 @@ class DocumentRow:
     status: str
     error_message: Optional[str]
     chunk_count: int
+    uploaded_by: Optional[int] = None
 
 
 @dataclass
@@ -289,15 +290,56 @@ class Database:
             row = cur.fetchone()
             return _row_to_document(row) if row else None
 
-    def list_documents(self) -> list[DocumentRow]:
+    def list_documents(self, owner_user_id: Optional[int] = None) -> list[DocumentRow]:
+        """Если owner_user_id задан — только документы этого пользователя
+        (по uploaded_by). Иначе — все."""
         with self.cursor() as cur:
-            cur.execute("SELECT * FROM documents ORDER BY upload_date DESC")
+            if owner_user_id is not None:
+                cur.execute(
+                    "SELECT * FROM documents WHERE uploaded_by=? ORDER BY upload_date DESC",
+                    (owner_user_id,),
+                )
+            else:
+                cur.execute("SELECT * FROM documents ORDER BY upload_date DESC")
             return [_row_to_document(r) for r in cur.fetchall()]
 
-    def count_documents(self) -> int:
+    def count_documents(self, owner_user_id: Optional[int] = None) -> int:
         with self.cursor() as cur:
-            cur.execute("SELECT COUNT(*) AS c FROM documents")
+            if owner_user_id is not None:
+                cur.execute(
+                    "SELECT COUNT(*) AS c FROM documents WHERE uploaded_by=?",
+                    (owner_user_id,),
+                )
+            else:
+                cur.execute("SELECT COUNT(*) AS c FROM documents")
             return int(cur.fetchone()["c"])
+
+    def get_chunk_owners(self, chunk_ids: list[int]) -> dict[int, Optional[int]]:
+        """Возвращает {chunk_id: uploaded_by} для фильтрации поиска по владельцу."""
+        if not chunk_ids:
+            return {}
+        placeholders = ",".join("?" * len(chunk_ids))
+        with self.cursor() as cur:
+            cur.execute(
+                f"""SELECT c.id, d.uploaded_by
+                    FROM chunks c JOIN documents d ON c.document_id = d.id
+                    WHERE c.id IN ({placeholders})""",
+                chunk_ids,
+            )
+            return {int(r["id"]): r["uploaded_by"] for r in cur.fetchall()}
+
+    def reset_processing_at_startup(self) -> int:
+        """Все documents в статусе 'pending'/'processing' остались от прошлого
+        запуска (BackgroundTasks не переживают рестарт сервера). Помечаем
+        как 'error' с пояснением, чтобы пользователь видел и мог перезалить."""
+        with self.cursor() as cur:
+            cur.execute(
+                """UPDATE documents
+                   SET status='error',
+                       error_message='Обработка прервана при перезапуске сервера. Загрузите файл заново.'
+                   WHERE status IN ('pending', 'processing')"""
+            )
+            return cur.rowcount
 
     def delete_document(self, document_id: int) -> list[int]:
         with self.cursor() as cur:
@@ -592,6 +634,8 @@ class Database:
 
 
 def _row_to_document(row: sqlite3.Row) -> DocumentRow:
+    keys = row.keys() if hasattr(row, "keys") else []
+    uploaded_by = row["uploaded_by"] if "uploaded_by" in keys else None
     return DocumentRow(
         id=int(row["id"]),
         filename=str(row["filename"]),
@@ -602,6 +646,7 @@ def _row_to_document(row: sqlite3.Row) -> DocumentRow:
         status=str(row["status"]),
         error_message=row["error_message"],
         chunk_count=int(row["chunk_count"] or 0),
+        uploaded_by=uploaded_by,
     )
 
 
