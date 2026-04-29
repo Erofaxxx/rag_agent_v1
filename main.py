@@ -90,7 +90,14 @@ async def lifespan(app: FastAPI):
     db.cleanup_expired_sessions()
     faiss_index.load_from_disk()
     if os.environ.get("PRELOAD_EMBEDDINGS", "1") == "1":
-        log.info("Прогружаю модель эмбеддингов в память (займёт минуту при первом старте)...")
+        # Для bge тут происходит реальная загрузка ~2 GB модели в RAM.
+        # Для yandex — короткий probe-запрос ради определения dim. Можно
+        # отключить через PRELOAD_EMBEDDINGS=0, тогда первый запрос будет
+        # чуть медленнее.
+        if settings.EMBEDDING_PROVIDER == "bge":
+            log.info("Прогружаю BGE-M3 в память (займёт минуту при первом старте)...")
+        else:
+            log.info("Инициализирую %s embedder...", settings.EMBEDDING_PROVIDER)
         embedding_service.load()
     log.info(
         "Готово: %d векторов в индексе (model=%s), пользователей в БД: %d",

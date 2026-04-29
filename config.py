@@ -43,11 +43,35 @@ class Settings(BaseSettings):
     # Paths
     DATA_DIR: str = "./data"
 
-    # Embedding
-    # Default — BGE-M3 (~2 GB RAM, лучшее качество, dim=1024).
-    # LITE для серверов с 4 GB RAM: EMBEDDING_MODEL=intfloat/multilingual-e5-small
-    # (~500 MB RAM, dim=384, чуть хуже на длинных текстах). Для e5-моделей нужны
-    # префиксы "passage: " / "query: " — задаются ниже.
+    # Embedding provider: 'yandex' (по умолчанию, через AI Studio) или 'bge'
+    # (локальный BGE-M3 / multilingual-e5; требует requirements-bge-fallback.txt).
+    EMBEDDING_PROVIDER: str = "yandex"
+
+    # ---- Yandex AI Studio ----
+    # Получить API-ключ: console.yandex.cloud → IAM → Сервисные аккаунты →
+    # создать аккаунт с ролью ai.languageModels.user → API-ключ
+    YANDEX_API_KEY: str = ""
+    YANDEX_FOLDER_ID: str = ""
+    # Асимметричные модели — НЕ путать местами! При индексации зовётся doc-модель,
+    # при поиске — query-модель. Это критично для качества retrieval.
+    YANDEX_EMBEDDING_DOC_MODEL: str = "text-search-doc"
+    YANDEX_EMBEDDING_QUERY_MODEL: str = "text-search-query"
+    # Размерность вектора. По умолчанию у Yandex — 256. Можно понизить (64-128)
+    # для экономии места и ускорения, но качество падает. 0 = использовать default.
+    YANDEX_EMBEDDING_DIMENSIONS: int = 0
+    # Защита от throttle. Yandex не публикует точный RPM, поэтому делаем
+    # консервативный лимит на стороне клиента.
+    YANDEX_EMBEDDING_RPM: int = 600
+    # Yandex embedding context — 2048 токенов (≈ 6000-8000 русских символов).
+    # Чанк длиннее — будет обрезан сервером, потеряем контекст.
+    YANDEX_EMBEDDING_MAX_CHARS: int = 6000
+
+    # ---- BGE-M3 / sentence-transformers fallback ----
+    # Используются ТОЛЬКО когда EMBEDDING_PROVIDER=bge.
+    # Для серверов с 4 GB RAM подойдёт `intfloat/multilingual-e5-small` (~500 MB):
+    #   EMBEDDING_MODEL=intfloat/multilingual-e5-small
+    #   EMBEDDING_QUERY_PREFIX=query:
+    #   EMBEDDING_PASSAGE_PREFIX=passage:
     EMBEDDING_MODEL: str = "BAAI/bge-m3"
     EMBEDDING_BATCH_SIZE: int = 16
     EMBEDDING_USE_FP16: bool = True

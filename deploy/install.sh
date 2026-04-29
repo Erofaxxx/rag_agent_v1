@@ -60,8 +60,13 @@ if [[ ! -f "$APP_DIR/.env" ]]; then
     sed -i "s|^DATA_DIR=.*|DATA_DIR=$DATA_DIR|" "$APP_DIR/.env"
 fi
 
-echo "==> Прогружаю BGE-M3 в кэш ~/.cache/huggingface (один раз ~2.3GB)"
-sudo -u "$APP_USER" "$APP_DIR/.venv/bin/python" - <<'PY'
+# BGE-M3 прогружаем ТОЛЬКО если EMBEDDING_PROVIDER=bge.
+# По умолчанию используется Yandex AI Studio — ничего качать не нужно.
+if grep -q "^EMBEDDING_PROVIDER=bge" "$APP_DIR/.env" 2>/dev/null; then
+    echo "==> EMBEDDING_PROVIDER=bge — ставлю локальные ML-зависимости (~3 GB)"
+    sudo -u "$APP_USER" "$APP_DIR/.venv/bin/pip" install -r "$APP_DIR/requirements-bge-fallback.txt"
+    echo "==> Прогружаю BGE-M3 в кэш (один раз ~2.3GB)"
+    sudo -u "$APP_USER" "$APP_DIR/.venv/bin/python" - <<'PY'
 import os
 os.environ.setdefault("HF_HUB_DISABLE_TELEMETRY", "1")
 try:
@@ -71,6 +76,9 @@ try:
 except Exception as e:
     print("WARN:", e)
 PY
+else
+    echo "==> EMBEDDING_PROVIDER=yandex (default) — локальная модель не нужна, сервис лёгкий"
+fi
 
 echo "==> Устанавливаю systemd-юнит"
 SERVICE_FILE=/etc/systemd/system/rag-agent.service
@@ -104,9 +112,16 @@ cat <<EOF
 
 Проверьте /etc/systemd/system/rag-agent.service и $APP_DIR/.env.
 Не забудьте проставить:
-  OPENROUTER_API_KEY
+  OPENROUTER_API_KEY                       # для DeepSeek
+  YANDEX_API_KEY и YANDEX_FOLDER_ID        # для эмбеддингов (если provider=yandex)
   ADMIN_BOOTSTRAP_EMAIL
   ADMIN_BOOTSTRAP_PASSWORD (минимум 10 символов, буква + цифра)
+
+Получить Yandex credentials:
+  1. console.yandex.cloud → создать каталог (folder)
+  2. IAM → Сервисные аккаунты → создать с ролью ai.languageModels.user
+  3. У созданного аккаунта → API-ключ (показывается один раз)
+  4. Folder ID — в URL/настройках каталога
 
 После первого входа смените пароль админа через UI и обнулите
 ADMIN_BOOTSTRAP_PASSWORD в .env.

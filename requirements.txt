@@ -25,15 +25,16 @@ openpyxl==3.1.5
 pandas==2.2.3
 python-pptx==1.0.2
 
-# ML / embeddings
-torch==2.5.1
-sentence-transformers==3.3.1
-FlagEmbedding==1.3.4
+# Embeddings (Yandex AI Studio — рекомендуется по умолчанию).
+# Для локального BGE-M3 fallback — см. requirements-bge-fallback.txt
+yandex-ai-studio-sdk==0.20.1
+
+# Vector search
 faiss-cpu==1.9.0.post1
 rank-bm25==0.2.2
 numpy==1.26.4
 
-# LLM agent
+# LLM agent (DeepSeek через OpenRouter)
 langchain==0.3.13
 langchain-core==0.3.28
 langchain-openai==0.2.14

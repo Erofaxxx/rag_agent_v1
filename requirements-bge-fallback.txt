@@ -1,0 +1,13 @@
+# Локальный BGE-M3 / multilingual-e5 эмбеддер. Ставится дополнительно ТОЛЬКО
+# если EMBEDDING_PROVIDER=bge. По умолчанию используется Yandex AI Studio
+# (см. requirements.txt).
+#
+#   pip install -r requirements.txt -r requirements-bge-fallback.txt
+#
+# Внимание: torch + sentence-transformers + FlagEmbedding занимают ~3 GB
+# на диске и держат ~2 GB RAM при запущенной модели. Если рабочий вариант —
+# Yandex, эти зависимости не нужны.
+
+torch==2.5.1
+sentence-transformers==3.3.1
+FlagEmbedding==1.3.4

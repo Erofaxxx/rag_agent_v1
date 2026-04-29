@@ -12,7 +12,8 @@
 - **FastAPI + Uvicorn** — HTTP API + статический фронтенд
 - **PyMuPDF / mammoth / openpyxl / python-pptx** — парсинг
 - **Tesseract OCR (rus+eng)** — fallback для сканов PDF
-- **BGE-M3** (`BAAI/bge-m3`) — эмбеддинги в FP16 на CPU
+- **Yandex AI Studio embeddings** (`text-search-doc` / `text-search-query`,
+  асимметричные) — по умолчанию. Локальный BGE-M3 — опциональный fallback.
 - **FAISS IndexFlatIP** — векторный поиск (всё в памяти, ~5 ms)
 - **DeepSeek через OpenRouter** — LLM
 - **LangGraph `create_react_agent`** — агент с тулом `search_documents`,
@@ -70,14 +71,33 @@ API auth/admin:
 
 ## Сколько ресурсов нужно
 
-| Конфиг сервера | Embedding-модель | Подходит? |
+| Конфиг сервера | EMBEDDING_PROVIDER | Подходит? |
 |---|---|---|
-| **8 GB RAM, 2-4 vCPU, 40+ GB SSD** | BGE-M3 (default) | ✅ Рекомендуется. Лучшее качество. |
-| **4 GB RAM, 2 vCPU, 40 GB NVMe** | `intfloat/multilingual-e5-small` (LITE) | ✅ Работает. См. `.env.example` блок «LITE режим». |
-| **4 GB RAM, BGE-M3** | — | ❌ OOM при OCR/индексации больших файлов. |
-| **2 GB RAM** | любая | ❌ Не хватит даже на старт Python+FAISS+OS. |
+| **1 GB RAM, 1 vCPU, 25 GB SSD** | yandex (default) | ✅ Достаточно для 1-2 пользователей. |
+| **2 GB RAM, 1 vCPU, 40 GB SSD** | yandex | ✅ С запасом. Рекомендуется. |
+| **4 GB RAM, 2 vCPU, 40 GB NVMe** | bge (e5-small) | ✅ Локальный fallback без интернета. |
+| **8 GB RAM, 2-4 vCPU, 40+ GB SSD** | bge (BGE-M3) | ✅ Лучшее локальное качество. |
+| **2 GB RAM, BGE-M3** | bge | ❌ OOM при OCR/индексации. |
 
-Конкретные тарифы для 1-2 пользователей: **Hetzner CX32 €4.50/мес** (4 vCPU ARM, 8 GB) с BGE-M3, или любой 4 GB VPS с LITE. Чтобы переключиться на LITE — раскомментируйте блок в `.env.example` вместо BGE-M3, удалите `data/faiss.index` (если был), перезапустите сервис.
+С Yandex эмбеддингами уходит ~2 GB RAM (модель в памяти не висит) и
+~3 GB диска (нет torch). Рекомендуется тариф **Hetzner CX22 €3.49/мес**
+(2 vCPU, 4 GB) или **DigitalOcean s-1vcpu-2gb** ($14/мес).
+
+Цена Yandex embeddings ≈ копейки в месяц на 1-2 пользователей: ~300 тыс. токенов
+один раз на индексацию 30-40 документов и ~70 тыс. токенов в месяц на запросы.
+
+Если Yandex не подходит (нет интернета, GDPR, желание полной автономии) —
+переключитесь на локальный BGE-M3:
+
+```bash
+# 1. Доустановить тяжёлые зависимости
+pip install -r requirements-bge-fallback.txt
+
+# 2. В .env: EMBEDDING_PROVIDER=bge
+
+# 3. Переиндексировать корпус
+python -m scripts.reindex --yes
+```
 
 ## Быстрый старт на сервере (Ubuntu 24.04 LTS)
 
@@ -286,6 +306,40 @@ curl -b jar.txt -H "X-Requested-With: fetch" -H "Content-Type: application/json"
     ├── Caddyfile
     └── backup.sh
 ```
+
+## Смена эмбеддинг-провайдера
+
+Эмбеддер выбирается через `EMBEDDING_PROVIDER` в `.env`:
+
+| Провайдер | Размерность | Контекст | RAM | Стоимость |
+|---|---|---|---|---|
+| `yandex` (default) | 256 | ~2048 токенов | ~50 MB | копейки/мес |
+| `bge` (BGE-M3) | 1024 | 8192 токенов | ~2 GB | 0 |
+| `bge` (e5-small) | 384 | 512 токенов | ~500 MB | 0 |
+
+**Размерности несовместимы.** Если меняете провайдер на работающем сервисе:
+
+```bash
+cd /opt/rag_agent_v1
+# 1. Поправить EMBEDDING_PROVIDER в .env
+sudo -u rag nano .env
+# 2. Если переходите на bge — доустановить:
+sudo -u rag .venv/bin/pip install -r requirements-bge-fallback.txt
+# 3. Перепрогнать существующие чанки через новую модель
+sudo -u rag .venv/bin/python -m scripts.reindex --yes
+# 4. Перезапустить
+sudo systemctl restart rag-agent
+```
+
+Скрипт `scripts/reindex.py` берёт текст всех чанков из SQLite, прогоняет через
+текущий провайдер и пересобирает FAISS-индекс. Файлы документов в
+`data/uploads/` не трогаются.
+
+**Асимметричные модели Yandex.** В отличие от BGE-M3 (одна модель и для doc,
+и для query), Yandex использует две разные модели — `text-search-doc` для
+индексации и `text-search-query` для поиска. Это не ошибка, а специально
+обученное под retrieval решение, обычно дающее качество выше симметричных
+моделей. Менять местами в `.env` нельзя — поиск просядет.
 
 ## Лимиты и эксплуатация
 
