@@ -716,6 +716,23 @@ body.role-user #welcomeUploadBtn2 { display: none !important; }
     line-height: 1.6;
 }
 .welcome-actions { margin-bottom: 24px; }
+.welcome-warn {
+    background: rgba(255, 152, 0, 0.10);
+    border: 1px solid rgba(255, 152, 0, 0.4);
+    color: var(--text);
+    padding: 10px 14px;
+    border-radius: 8px;
+    font-size: 13px;
+    line-height: 1.5;
+    margin: 0 auto 18px;
+    max-width: 480px;
+    text-align: left;
+}
+.welcome-context {
+    color: var(--text-muted);
+    font-size: 12.5px;
+    margin: 0 0 16px;
+}
 .welcome-examples {
     display: flex;
     flex-wrap: wrap;
@@ -1056,6 +1073,7 @@ body.role-user #welcomeUploadBtn2 { display: none !important; }
     flex: 1;
     position: relative;
     background: var(--surface-2);
+    min-height: 0;
 }
 .source-iframe {
     width: 100%;
@@ -1078,8 +1096,8 @@ body.role-user #welcomeUploadBtn2 { display: none !important; }
 
 /* ===== PDF viewer (custom, with bbox highlights) ===== */
 .pdf-viewer {
-    width: 100%;
-    height: 100%;
+    position: absolute;
+    inset: 0;
     display: flex;
     flex-direction: column;
     background: var(--surface-2);
@@ -1091,6 +1109,7 @@ body.role-user #welcomeUploadBtn2 { display: none !important; }
     padding: 6px 12px;
     border-bottom: 1px solid var(--border);
     background: var(--surface);
+    flex-shrink: 0;
 }
 .pdf-page-info, .pdf-zoom-info {
     font-size: 12px;
@@ -1100,13 +1119,16 @@ body.role-user #welcomeUploadBtn2 { display: none !important; }
     text-align: center;
 }
 .pdf-toolbar-spacer { flex: 1; }
+/* Прокручиваемая зона. Block-layout вместо flex-центрирования: при странице,
+   шире панели, flex justify-content:center съедает левый край и его не
+   доскроллить. С auto-margin контейнер центрируется когда умещается, и
+   просто прижимается влево когда шире — горизонтальный скролл работает. */
 .pdf-canvas-wrap {
     flex: 1;
+    min-height: 0;
     overflow: auto;
     padding: 16px;
-    display: flex;
-    justify-content: center;
-    align-items: flex-start;
+    overscroll-behavior: contain;
 }
 .pdf-page-container {
     position: relative;
@@ -1114,6 +1136,7 @@ body.role-user #welcomeUploadBtn2 { display: none !important; }
     box-shadow: 0 4px 16px rgba(0, 0, 0, 0.4);
     border-radius: 4px;
     overflow: hidden;
+    margin: 0 auto;
     /* canvas размер задаём в JS, контейнер сам подстроится */
 }
 .pdf-page-container canvas {
