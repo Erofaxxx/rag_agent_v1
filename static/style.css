@@ -1123,6 +1123,19 @@ body.resizing-source iframe {
 }
 .source-html-viewer img { max-width: 100%; height: auto; }
 .source-html-viewer a { color: #0a66c2; text-decoration: underline; }
+/* Точечная подсветка совпадения со snippet'ом — обёрнутый <mark>. */
+.source-html-viewer mark.snippet-mark {
+    background: rgba(255, 213, 79, 0.55);
+    color: inherit;
+    padding: 0 2px;
+    border-radius: 2px;
+    box-shadow: 0 0 0 1px rgba(255, 152, 0, 0.45);
+    animation: snippetPulse 1.6s ease-in-out 2;
+}
+@keyframes snippetPulse {
+    0%, 100% { background: rgba(255, 213, 79, 0.55); }
+    50%      { background: rgba(255, 152, 0, 0.65); }
+}
 .source-header {
     padding: 14px 16px;
     border-bottom: 1px solid var(--border);
