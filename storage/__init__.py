@@ -5,6 +5,9 @@ from storage.database import (
     ChunkRow,
     ConversationRow,
     MessageRow,
+    UserRow,
+    SessionRow,
+    AuditRow,
 )
 
 __all__ = [
@@ -14,4 +17,7 @@ __all__ = [
     "ChunkRow",
     "ConversationRow",
     "MessageRow",
+    "UserRow",
+    "SessionRow",
+    "AuditRow",
 ]

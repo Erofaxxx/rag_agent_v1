@@ -10,6 +10,7 @@ const state = {
     documents: [],
     polling: new Set(),
     sending: false,
+    user: null, // {id, email, role, is_active, ...}
 };
 
 // ---------- DOM ----------
@@ -111,11 +112,36 @@ function autoresize(textarea) {
 }
 
 async function api(path, opts = {}) {
-    const res = await fetch(API + path, opts);
-    if (res.status === 401) throw new Error("Не авторизован");
+    const headers = Object.assign({}, opts.headers || {});
+    const method = (opts.method || "GET").toUpperCase();
+    if (method !== "GET" && method !== "HEAD") {
+        // CSRF: SameSite=Lax cookie + кастомный заголовок,
+        // которого браузер не выставит при cross-site POST.
+        headers["X-Requested-With"] = "fetch";
+    }
+    if (opts.body && !(opts.body instanceof FormData)) {
+        headers["Content-Type"] = headers["Content-Type"] || "application/json";
+    }
+    const res = await fetch(API + path, Object.assign({}, opts, { headers, credentials: "same-origin" }));
+    if (res.status === 401) {
+        // Сессия протухла или её нет — на /login
+        if (location.pathname !== "/login") location.href = "/login";
+        throw new Error("Не авторизован");
+    }
+    if (res.status === 403) {
+        let detail = "Недостаточно прав";
+        try { const j = await res.json(); if (j.detail) detail = j.detail; } catch (_) {}
+        throw new Error(detail);
+    }
     if (!res.ok) {
-        const text = await res.text().catch(() => "");
-        throw new Error(`${res.status}: ${text || res.statusText}`);
+        let detail = res.statusText;
+        try {
+            const j = await res.json();
+            if (j.detail) detail = typeof j.detail === "string" ? j.detail : JSON.stringify(j.detail);
+        } catch (_) {
+            try { detail = await res.text(); } catch (_) {}
+        }
+        throw new Error(`${res.status}: ${detail}`);
     }
     if (res.status === 204) return null;
     return res.json();
@@ -271,10 +297,8 @@ async function loadDocuments() {
         const ready = state.documents.filter(d => d.status === "ready").length;
         const procc = state.documents.filter(d => d.status === "pending" || d.status === "processing").length;
         const errors = state.documents.filter(d => d.status === "error").length;
-        let status = `${ready} готово`;
-        if (procc) status += ` · ${procc} в обработке`;
-        if (errors) status += ` · ${errors} ошибок`;
-        els.globalStatus.textContent = status;
+        // Доп. статус документов в подзаголовке чата (если открыт welcome)
+        // оставляем globalStatus = роль пользователя, обновлённую в renderUserWidget.
 
         for (const d of state.documents) {
             if (d.status === "pending" || d.status === "processing") pollDocument(d.id);
@@ -436,9 +460,20 @@ function renderMessage(role, content, citedChunks = []) {
     msg.className = "message";
 
     if (role === "assistant" && window.marked) {
-        msg.innerHTML = window.marked.parse(content || "", { breaks: true, gfm: true });
+        const raw = window.marked.parse(content || "", { breaks: true, gfm: true });
+        // DOMPurify защищает от XSS, если LLM вернёт HTML/script-инъекции.
+        // Если по какой-то причине DOMPurify не загрузился — fallback в plain text.
+        if (window.DOMPurify) {
+            msg.innerHTML = window.DOMPurify.sanitize(raw, {
+                ALLOWED_TAGS: ["p", "br", "strong", "em", "code", "pre", "ul", "ol", "li", "blockquote", "h1", "h2", "h3", "h4", "a", "table", "thead", "tbody", "tr", "th", "td", "hr", "del", "ins"],
+                ALLOWED_ATTR: ["href", "title", "class"],
+                ALLOWED_URI_REGEXP: /^(?:(?:https?|mailto):|[^a-z]|[a-z+.-]+(?:[^a-z+.\-:]|$))/i,
+            });
+        } else {
+            msg.textContent = content;
+        }
     } else {
-        msg.innerHTML = escapeHtml(content);
+        msg.textContent = content;
     }
 
     if (role === "assistant" && citedChunks?.length) {
@@ -671,17 +706,89 @@ function bindEvents() {
 
 // ---------- Init ----------
 
+async function loadCurrentUser() {
+    try {
+        state.user = await api("/auth/me");
+    } catch (_) {
+        // 401 уже редиректит в /login
+        return false;
+    }
+    if (!state.user.is_active) {
+        location.href = "/pending";
+        return false;
+    }
+    renderUserWidget();
+    applyRolePermissions();
+    return true;
+}
+
+function renderUserWidget() {
+    const u = state.user;
+    if (!u) return;
+    const initials = ((u.display_name || u.email).match(/\b\w/g) || []).slice(0, 2).join("").toUpperCase() || "?";
+    document.getElementById("userAvatar").textContent = initials;
+    document.getElementById("userName").textContent = u.display_name || u.email;
+    document.getElementById("globalStatus").textContent = u.role === "admin" ? "Администратор" : "Пользователь";
+    if (u.role === "admin") {
+        document.getElementById("adminLink").hidden = false;
+    }
+}
+
+function applyRolePermissions() {
+    // Юзер не-админ: прячем upload/delete UI документов
+    if (state.user && state.user.role !== "admin") {
+        document.body.classList.add("role-user");
+    }
+}
+
+function bindUserMenu() {
+    const btn = document.getElementById("userMenuBtn");
+    const dd = document.getElementById("userMenuDropdown");
+    if (!btn || !dd) return;
+    btn.addEventListener("click", e => {
+        e.stopPropagation();
+        dd.hidden = !dd.hidden;
+    });
+    document.addEventListener("click", e => {
+        if (!dd.contains(e.target) && e.target !== btn) dd.hidden = true;
+    });
+    document.getElementById("logoutBtn").addEventListener("click", async () => {
+        try { await api("/auth/logout", { method: "POST" }); } catch (_) {}
+        location.href = "/login";
+    });
+    document.getElementById("changePasswordBtn").addEventListener("click", async () => {
+        const cur = prompt("Текущий пароль:");
+        if (!cur) return;
+        const next = prompt("Новый пароль (минимум 10 символов, буква + цифра):");
+        if (!next) return;
+        try {
+            await api("/auth/change-password", {
+                method: "POST",
+                body: JSON.stringify({ current_password: cur, new_password: next }),
+            });
+            alert("Пароль изменён. Войдите заново.");
+            location.href = "/login";
+        } catch (e) {
+            alert("Ошибка: " + e.message);
+        }
+    });
+}
+
 async function init() {
     bindEvents();
+    bindUserMenu();
     bindWelcomeHandlers();
     autoresize(els.chatInput);
     els.app.classList.add("docs-open");
     updateCharCount();
 
+    const ok = await loadCurrentUser();
+    if (!ok) return;
+
     // Параллельно: чаты и документы
     await Promise.all([loadConversations(), loadDocuments()]);
 
-    // Каждые 60s обновляем статусы
+    // Каждые 60s обновляем статусы документов
     setInterval(loadDocuments, 60000);
 
     els.chatInput.focus();

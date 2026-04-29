@@ -1,0 +1,35 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Ожидание одобрения — RAG Agent</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
+    <link rel="stylesheet" href="/static/auth.css">
+</head>
+<body>
+    <div class="auth-page">
+        <div class="auth-card">
+            <div class="auth-logo">
+                <div class="logo-icon">
+                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/></svg>
+                </div>
+                <h1>RAG Agent</h1>
+            </div>
+
+            <h2>Ожидание одобрения</h2>
+            <p class="subtitle">Ваш аккаунт зарегистрирован. Доступ к чату появится после того, как администратор одобрит вашу учётную запись.</p>
+
+            <div class="alert info">
+                Если ожидаете долго — свяжитесь с администратором напрямую.
+            </div>
+
+            <button id="logoutBtn" class="btn-secondary btn-block">Выйти</button>
+        </div>
+    </div>
+
+    <script src="/static/auth.js"></script>
+</body>
+</html>

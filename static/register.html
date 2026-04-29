@@ -1,0 +1,53 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Регистрация — RAG Agent</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
+    <link rel="stylesheet" href="/static/auth.css">
+</head>
+<body>
+    <div class="auth-page">
+        <div class="auth-card">
+            <div class="auth-logo">
+                <div class="logo-icon">
+                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/></svg>
+                </div>
+                <h1>RAG Agent</h1>
+            </div>
+
+            <h2>Регистрация</h2>
+            <p class="subtitle">Создайте аккаунт. Доступ к чату появится после одобрения администратором.</p>
+
+            <div id="alert" class="alert error" style="display:none"></div>
+
+            <form id="registerForm" autocomplete="on">
+                <div class="field">
+                    <label for="display_name">Ваше имя <span class="field-hint">(необязательно)</span></label>
+                    <input type="text" id="display_name" name="display_name" autocomplete="name" maxlength="120">
+                </div>
+                <div class="field">
+                    <label for="email">Email</label>
+                    <input type="email" id="email" name="email" autocomplete="username" required spellcheck="false" autocapitalize="off">
+                </div>
+                <div class="field">
+                    <label for="password">Пароль</label>
+                    <input type="password" id="password" name="password" autocomplete="new-password" required minlength="10" maxlength="256">
+                    <div class="password-meter" id="meter"><span></span><span></span><span></span><span></span></div>
+                    <div class="field-hint">Минимум 10 символов, минимум одна буква и одна цифра</div>
+                </div>
+                <button type="submit" id="submitBtn" class="btn-primary btn-block">Создать аккаунт</button>
+            </form>
+
+            <div class="auth-footer">
+                <span>Уже зарегистрированы?</span> <a href="/login">Войти</a>
+            </div>
+        </div>
+    </div>
+
+    <script src="/static/auth.js"></script>
+</body>
+</html>

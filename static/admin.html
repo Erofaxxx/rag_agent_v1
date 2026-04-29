@@ -1,0 +1,70 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Админ-панель — RAG Agent</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
+    <link rel="stylesheet" href="/static/auth.css">
+</head>
+<body>
+    <div class="admin-shell">
+        <header class="admin-header">
+            <div style="display:flex; align-items:center; gap:14px;">
+                <div class="auth-logo" style="margin:0;">
+                    <div class="logo-icon" style="width:32px; height:32px;">
+                        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M12 2l9 4v6c0 5.5-3.8 10.5-9 12-5.2-1.5-9-6.5-9-12V6l9-4z"/></svg>
+                    </div>
+                    <h1>Админ-панель</h1>
+                </div>
+            </div>
+            <div class="admin-header-actions">
+                <a href="/" class="btn-secondary btn-tiny" style="text-decoration:none;">К чату</a>
+                <button id="logoutBtn" class="btn-secondary btn-tiny">Выйти</button>
+            </div>
+        </header>
+
+        <div class="admin-content">
+            <div id="alert" class="alert error" style="display:none"></div>
+
+            <div class="admin-tabs">
+                <button class="active" data-tab="users">Пользователи</button>
+                <button data-tab="audit">Журнал событий</button>
+            </div>
+
+            <section id="tabUsers">
+                <div style="margin-bottom:12px; display:flex; gap:8px; align-items:center;">
+                    <input id="userSearch" type="text" placeholder="Поиск по email или имени..." style="flex:1; padding:8px 12px; border:1px solid var(--border); border-radius:var(--radius-sm); font-size:13px;">
+                    <button id="reloadBtn" class="btn-secondary btn-tiny">Обновить</button>
+                </div>
+                <table class="users-table">
+                    <thead>
+                        <tr>
+                            <th>Email</th>
+                            <th>Имя</th>
+                            <th>Роль</th>
+                            <th>Статус</th>
+                            <th>Зарегистрирован</th>
+                            <th>Последний вход</th>
+                            <th>Действия</th>
+                        </tr>
+                    </thead>
+                    <tbody id="usersBody"></tbody>
+                </table>
+            </section>
+
+            <section id="tabAudit" style="display:none;">
+                <div style="margin-bottom:12px;">
+                    <button id="reloadAuditBtn" class="btn-secondary btn-tiny">Обновить</button>
+                </div>
+                <div id="auditList" class="audit-list"></div>
+            </section>
+        </div>
+    </div>
+
+    <script src="/static/auth.js"></script>
+    <script src="/static/admin.js"></script>
+</body>
+</html>

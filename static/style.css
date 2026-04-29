@@ -224,8 +224,46 @@ input, textarea { font-family: inherit; font-size: inherit; color: inherit; }
     flex-shrink: 0;
 }
 .user-info { min-width: 0; flex: 1; }
-.user-name { font-size: 13px; font-weight: 600; }
+.user-name { font-size: 13px; font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .user-status { font-size: 11px; color: var(--text-muted); }
+
+.user-menu { position: relative; }
+.user-menu-dropdown {
+    position: absolute;
+    bottom: 100%;
+    right: 0;
+    margin-bottom: 6px;
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    box-shadow: var(--shadow);
+    min-width: 180px;
+    overflow: hidden;
+    z-index: 50;
+}
+.user-menu-dropdown a, .user-menu-dropdown button {
+    display: block;
+    width: 100%;
+    padding: 9px 14px;
+    font-size: 13px;
+    text-align: left;
+    background: transparent;
+    border: none;
+    color: var(--text);
+    cursor: pointer;
+    text-decoration: none;
+    border-bottom: 1px solid var(--border);
+}
+.user-menu-dropdown > *:last-child { border-bottom: none; }
+.user-menu-dropdown a:hover, .user-menu-dropdown button:hover {
+    background: var(--surface-hover);
+}
+
+/* Скрываем upload и delete для не-админов */
+body.role-user .drop-zone,
+body.role-user .doc-delete,
+body.role-user #welcomeUploadBtn,
+body.role-user #welcomeUploadBtn2 { display: none !important; }
 
 /* ===== Chat area ===== */
 .chat-area {

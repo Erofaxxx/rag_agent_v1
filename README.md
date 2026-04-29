@@ -1,10 +1,11 @@
 # RAG Agent
 
-Корпоративный RAG-помощник по документам.
+Корпоративный RAG-помощник по документам с регистрацией пользователей и
+админ-панелью.
 
-Один пользователь загружает 30–40 документов (PDF, DOCX, XLSX, PPTX) и
-переписывается с агентом, который отвечает по содержимому строго с цитатами
-на источник (имя файла + страница / лист / слайд).
+Админ загружает документы (PDF, DOCX, XLSX, PPTX), пользователи регистрируются
+и после одобрения админа могут общаться с агентом, который отвечает по
+содержимому строго с цитатами на источник (имя файла + страница / лист / слайд).
 
 Стек:
 
@@ -16,11 +17,56 @@
 - **DeepSeek через OpenRouter** — LLM
 - **LangGraph `create_react_agent`** — агент с тулом `search_documents`,
   чтобы делать 1–2 поиска за вопрос вместо одного жирного контекста
-- **SQLite** — метаданные, история чатов
-- **HTML/JS** — минимальный фронтенд с drag-and-drop папок и чатом
+- **SQLite** — метаданные, история чатов, пользователи, сессии, audit-log
+- **Argon2id + cookie sessions** — регистрация, login, рабочая админ-панель
+- **HTML/JS** — фронт без сборки (Inter + marked.js + DOMPurify)
 
 Полностью один процесс на одном сервере. Никаких внешних векторных БД,
 очередей и микросервисов.
+
+## Аутентификация и роли
+
+- **Регистрация открыта** (можно отключить через `ALLOW_PUBLIC_REGISTRATION=false`).
+- Новый пользователь после регистрации получает статус **pending** и не может
+  пользоваться чатом, пока админ не одобрит его в админ-панели.
+- **Роли**: `admin` (всё, включая загрузку/удаление документов и управление
+  пользователями) и `user` (только чат и собственная история).
+- **Сессии** в httpOnly cookie с серверным хранением — можно отозвать любую
+  через UI или БД.
+- **Bootstrap первого админа** через `ADMIN_BOOTSTRAP_EMAIL`/`ADMIN_BOOTSTRAP_PASSWORD`
+  при первом старте сервиса. После — смените пароль через UI и удалите эти
+  переменные из .env.
+- **Защита от взлома**: Argon2id хеши, rate limit на login/register, временный
+  лок аккаунта после 5 неудач, audit-log всех значимых событий
+  (login_success/fail, approve/reject, role_change, lockout, password_change,
+  delete_user).
+- **CSRF**: SameSite=Lax cookie + кастомный заголовок `X-Requested-With: fetch`
+  на всех state-changing запросах.
+- **Security headers**: HSTS, CSP (`default-src 'self'` с whitelist для
+  jsdelivr и Google Fonts), X-Frame-Options DENY, Referrer-Policy
+  strict-origin-when-cross-origin, Permissions-Policy.
+
+Страницы фронта:
+- `/login` — вход
+- `/register` — регистрация (если включена)
+- `/pending` — экран ожидания одобрения, авто-проверка раз в 15 секунд
+- `/` — основное приложение чата
+- `/admin` — админ-панель (только для роли admin)
+
+API auth/admin:
+- `POST /api/auth/register` — регистрация
+- `POST /api/auth/login` — login
+- `POST /api/auth/logout` — logout (требует X-Requested-With)
+- `GET /api/auth/me` — кто я
+- `POST /api/auth/change-password` — смена своего пароля
+- `GET /api/admin/users` — список пользователей
+- `POST /api/admin/users/{id}/approve` — одобрить, выдать роль
+- `POST /api/admin/users/{id}/deactivate` — деактивировать
+- `POST /api/admin/users/{id}/role` — сменить роль
+- `POST /api/admin/users/{id}/unlock` — снять временный лок
+- `POST /api/admin/users/{id}/reset-password` — задать новый пароль
+- `DELETE /api/admin/users/{id}` — удалить
+- `GET /api/admin/audit` — журнал событий
 
 ## Сколько ресурсов нужно
 
@@ -55,17 +101,23 @@ sudo DOMAIN=rag.example.com bash deploy/install.sh
 
 # 4. Отредактируйте /opt/rag_agent_v1/.env
 sudo -u rag nano /opt/rag_agent_v1/.env
-# Минимум: OPENROUTER_API_KEY и AUTH_PASSWORD
+# Минимум:
+#   OPENROUTER_API_KEY=sk-or-v1-...
+#   ADMIN_BOOTSTRAP_EMAIL=you@example.com
+#   ADMIN_BOOTSTRAP_PASSWORD=сильный_пароль_минимум_10_символов
+# (после первого входа поменяйте пароль через UI и обнулите эти поля)
 
 # 5. Перезапустите
 sudo systemctl restart rag-agent
 
 # 6. Проверьте
-curl -u admin:ВАШ_ПАРОЛЬ http://127.0.0.1:8000/api/health
+curl http://127.0.0.1:8000/api/health
 ```
 
-Зайдите в браузере на `https://rag.example.com` (или `http://IP:8000`),
-залогиньтесь, перетащите папку с документами — и общайтесь.
+Зайдите в браузере на `https://rag.example.com`, войдите под bootstrap-админом,
+загрузите документы через правую панель и пригласите коллег регистрироваться по
+адресу `https://rag.example.com/register`. После регистрации одобрьте их в
+`/admin`.
 
 ## Что устанавливает install.sh
 
@@ -90,38 +142,61 @@ pip install -r requirements.txt
 brew install tesseract tesseract-lang poppler libmagic libreoffice
 
 cp .env.example .env
-# впишите OPENROUTER_API_KEY и AUTH_PASSWORD
+# впишите OPENROUTER_API_KEY, ADMIN_BOOTSTRAP_EMAIL, ADMIN_BOOTSTRAP_PASSWORD
+# Для локального http:// поставьте SESSION_COOKIE_SECURE=false
 
 uvicorn main:app --reload
-# открыть http://127.0.0.1:8000 — браузер спросит admin / ваш пароль
+# открыть http://127.0.0.1:8000 — будет редирект на /login
 ```
 
 ## API
 
-Все эндпоинты под HTTP Basic Auth (`AUTH_USERNAME` / `AUTH_PASSWORD` из `.env`).
+Все эндпоинты (кроме `/api/auth/login`, `/register`, `/api/health`) требуют
+валидной cookie-сессии. Все state-changing запросы (POST/DELETE) требуют
+заголовок `X-Requested-With: fetch` (CSRF).
 
-| Метод   | Путь                                | Назначение                          |
-|---------|-------------------------------------|-------------------------------------|
-| POST    | `/api/documents`                    | Загрузка одного или нескольких файлов |
-| GET     | `/api/documents`                    | Список документов со статусами      |
-| GET     | `/api/documents/{id}/status`        | Статус обработки (для polling)      |
-| DELETE  | `/api/documents/{id}`               | Удаление документа и его чанков     |
-| POST    | `/api/chat`                         | Сообщение в чат, ответ с цитатами   |
-| GET     | `/api/conversations`                | Список диалогов                     |
-| POST    | `/api/conversations`                | Создать новый диалог                |
-| GET     | `/api/conversations/{id}`           | История одного диалога              |
-| DELETE  | `/api/conversations/{id}`           | Удалить диалог                      |
-| GET     | `/api/health`                       | Health check                        |
+Документы — только для роли `admin` (загрузка/удаление). Чтение — все
+авторизованные.
 
-### Пример
+| Метод | Путь | Роль | Назначение |
+|---|---|---|---|
+| POST | `/api/auth/register` | — | Регистрация нового пользователя (pending) |
+| POST | `/api/auth/login` | — | Login, ставит httpOnly-cookie |
+| POST | `/api/auth/logout` | user | Завершить сессию |
+| GET | `/api/auth/me` | user | Текущий пользователь |
+| POST | `/api/auth/change-password` | user | Сменить свой пароль |
+| GET | `/api/admin/users` | admin | Список пользователей |
+| POST | `/api/admin/users/{id}/approve` | admin | Одобрить + выдать роль |
+| POST | `/api/admin/users/{id}/deactivate` | admin | Деактивировать |
+| POST | `/api/admin/users/{id}/role` | admin | Сменить роль |
+| POST | `/api/admin/users/{id}/unlock` | admin | Снять временный лок |
+| POST | `/api/admin/users/{id}/reset-password` | admin | Принудительный сброс пароля |
+| DELETE | `/api/admin/users/{id}` | admin | Удалить пользователя и его сессии |
+| GET | `/api/admin/audit` | admin | Журнал событий |
+| POST | `/api/documents` | admin | Загрузка файлов |
+| GET | `/api/documents` | user | Список документов |
+| DELETE | `/api/documents/{id}` | admin | Удалить документ |
+| POST | `/api/chat` | user | Сообщение в чат |
+| GET | `/api/conversations` | user | Свои диалоги (admin — все) |
+| POST | `/api/conversations` | user | Создать диалог |
+| DELETE | `/api/conversations/{id}` | user | Удалить свой диалог |
+| GET | `/api/health` | — | Health check |
+
+### Пример (curl с сессией)
 
 ```bash
-# Загрузка
-curl -u admin:PASS -F "files=@manual.pdf" -F "files=@report.xlsx" \
+# Login и сохраняем cookies
+curl -c jar.txt -X POST -H "Content-Type: application/json" \
+  -d '{"email":"admin@example.com","password":"СильныйПароль42"}' \
+  http://127.0.0.1:8000/api/auth/login
+
+# Загрузка документа (требует cookies + CSRF header)
+curl -b jar.txt -H "X-Requested-With: fetch" \
+  -F "files=@manual.pdf" \
   http://127.0.0.1:8000/api/documents
 
 # Чат
-curl -u admin:PASS -H "Content-Type: application/json" \
+curl -b jar.txt -H "X-Requested-With: fetch" -H "Content-Type: application/json" \
   -d '{"message": "Что сказано про сроки в договоре?"}' \
   http://127.0.0.1:8000/api/chat
 ```
@@ -173,15 +248,20 @@ curl -u admin:PASS -H "Content-Type: application/json" \
 
 ```
 .
-├── main.py                  # FastAPI app, lifespan, статика
+├── main.py                  # FastAPI app, lifespan, security headers, статика
 ├── config.py                # pydantic-settings из .env
 ├── requirements.txt
 ├── .env.example
-├── api/                     # эндпоинты
-│   ├── auth.py              # HTTP Basic
-│   ├── documents.py         # upload / list / delete + фоновая обработка
-│   ├── chat.py              # POST /api/chat
-│   └── conversations.py
+├── auth/
+│   ├── passwords.py         # Argon2id хеширование, валидация силы
+│   ├── sessions.py          # cookie httpOnly, sha256(token) в БД
+│   ├── dependencies.py      # require_user / require_admin / csrf_check
+│   └── router.py            # /api/auth/* + rate-limit (slowapi)
+├── api/
+│   ├── documents.py         # upload (admin) / list / delete (admin) + фон. обработка
+│   ├── chat.py              # POST /api/chat (изоляция диалогов по user_id)
+│   ├── conversations.py
+│   └── admin.py             # /api/admin/users/* + /api/admin/audit
 ├── parsers/                 # один модуль на формат
 │   ├── pdf_parser.py        # PyMuPDF + OCR fallback
 │   ├── docx_parser.py       # mammoth → markdown
@@ -190,12 +270,16 @@ curl -u admin:PASS -H "Content-Type: application/json" \
 │   └── router.py            # python-magic + расширение → нужный парсер
 ├── chunking/chunker.py      # рекурсивный сплиттер по сепараторам
 ├── embeddings/bge_m3.py     # singleton, FlagEmbedding или sentence-transformers
-├── search/faiss_index.py    # FAISS + SearchService с опциональным BM25
+├── search/faiss_index.py    # FAISS + SearchService (opt. BM25)
 ├── llm/
 │   ├── prompts.py
 │   └── agent.py             # ReAct-агент с tool search_documents
-├── storage/database.py      # SQLite (WAL, foreign keys)
-├── static/                  # минимальный фронт (drag-n-drop + чат)
+├── storage/database.py      # SQLite: documents, chunks, conversations, messages,
+│                            # users, sessions, auth_audit
+├── static/                  # фронт без сборки
+│   ├── index.html, app.js, style.css   # главное приложение
+│   ├── login.html, register.html, pending.html, auth.js, auth.css
+│   └── admin.html, admin.js
 └── deploy/
     ├── install.sh
     ├── rag-agent.service
@@ -208,20 +292,43 @@ curl -u admin:PASS -H "Content-Type: application/json" \
 - Размер файла: `MAX_FILE_SIZE_MB=50`
 - Документов суммарно: `MAX_DOCUMENTS=100`
 - История в LLM: последние `MAX_HISTORY_MESSAGES=8` сообщений
+- Сессия: `SESSION_LIFETIME_DAYS=7`, sliding (обновляется при активности)
+- Brute force: `LOGIN_MAX_FAILED_ATTEMPTS=5` → лок на `LOGIN_LOCKOUT_MINUTES=15`
+- Rate limit: `RATE_LIMIT_LOGIN_PER_MINUTE=10` / `RATE_LIMIT_REGISTER_PER_HOUR=5`
 - Логи: `/data/logs/rag.log` с ротацией 10 MB × 5 файлов + journald
 - Бэкапы: `deploy/backup.sh` в `/etc/cron.daily/`
 
+## Безопасность — что сделано
+
+| Угроза | Защита |
+|---|---|
+| Brute force паролей | Argon2id (~50ms на хеш) + rate limit + лок аккаунта на 15 мин после 5 неудач |
+| Кража БД с паролями | Argon2id с уникальной солью (формат `$argon2id$...`) |
+| Кража cookie | httpOnly + Secure + SameSite=Lax. В БД хранится только sha256(token), а не сам токен |
+| Session fixation | Новый токен генерится на каждый login |
+| CSRF | SameSite=Lax + кастомный header `X-Requested-With: fetch` на POST/PUT/DELETE |
+| XSS в ответе LLM | DOMPurify санитизирует markdown-вывод; строгий CSP |
+| XSS в имени файла / диалога | `textContent` вместо `innerHTML` для пользовательского ввода |
+| Path traversal в загрузке | Sanitization имени файла + изоляция в `/data/uploads/{doc_id}/` |
+| SQL injection | Только параметризованные запросы |
+| Email enumeration | Generic-ошибка при дубликате на регистрации, dummy-verify при отсутствии юзера |
+| Timing attack на login | Прогон через verify даже если юзера нет |
+| Privilege escalation | Server-side role check на каждом admin-эндпоинте |
+| Удаление последнего админа | Заблокировано в API |
+| Clickjacking | `X-Frame-Options: DENY` + `frame-ancestors 'none'` |
+| MIME sniffing | `X-Content-Type-Options: nosniff` |
+| HTTPS downgrade | HSTS (max-age=1 год) когда `SESSION_COOKIE_SECURE=true` |
+| Утечка прав через API | Документы — только admin upload/delete; чтение для всех; чаты per-user |
+| Audit log | login/logout/approve/reject/role_change/lockout/password_change в `auth_audit` |
+
 ## Что НЕ сделано (намеренно)
 
-См. [ТЗ §14](#) — никакого Qdrant, реранкера, Docker, Celery, мультиюзерности.
-LLM-стриминг можно добавить второй итерацией: сейчас ответ возвращается одним
-JSON.
-
-## Безопасность
-
-- HTTP Basic — по сути один пароль. Закрыто HTTPS через Caddy. Достаточно для
-  одного пользователя; не годится для публичной системы.
-- API-ключ OpenRouter — только в `.env`, **не коммитьте**.
+- **Email-верификация** — требует SMTP. Mitigated: rate-limit на регистрацию + ручной approval.
+- **2FA** — для 1-2 пользователей оверкилл; админ может включить в next-итерации (TOTP).
+- **Password reset через email** — сейчас reset делает админ через UI.
+- **OAuth/SSO** — out of scope.
+- **Per-user изоляция документов** — by design: документы корпоративные, общие.
+  Только админ загружает; users только спрашивают и видят свои чаты.
 - Загрузки изолированы в `/data/uploads/{document_id}/`. Имя файла берётся как
   есть, путь не используется как параметр в shell-командах.
 

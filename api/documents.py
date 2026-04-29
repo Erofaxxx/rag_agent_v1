@@ -1,4 +1,5 @@
 import logging
+import re
 import shutil
 import time
 from pathlib import Path
@@ -7,7 +8,8 @@ from typing import Optional
 from fastapi import APIRouter, BackgroundTasks, Depends, File, HTTPException, UploadFile, status
 from pydantic import BaseModel
 
-from api.auth import require_auth
+from auth.dependencies import csrf_check, require_admin, require_user
+from storage import UserRow
 from chunking import chunk_segments
 from config import settings
 from embeddings import embedding_service
@@ -17,6 +19,28 @@ from storage import db
 
 log = logging.getLogger(__name__)
 router = APIRouter(prefix="/api/documents", tags=["documents"])
+
+
+_FILENAME_BAD_CHARS = re.compile(r"[\x00-\x1f/\\<>:\"|?*]")
+
+
+def sanitize_filename(name: str) -> str:
+    """Убирает path-traversal и опасные символы. Возвращает 'unnamed' если пусто."""
+    if not name:
+        return "unnamed"
+    # Только базовое имя — без директорий
+    name = Path(name).name
+    name = _FILENAME_BAD_CHARS.sub("_", name)
+    # Не оставляем точки в начале (.htaccess, .env и т.п.)
+    name = name.lstrip(".")
+    # Ограничим длину
+    if len(name) > 200:
+        stem, dot, ext = name.rpartition(".")
+        if dot and len(ext) <= 8:
+            name = stem[: 200 - len(ext) - 1] + "." + ext
+        else:
+            name = name[:200]
+    return name or "unnamed"
 
 
 class DocumentOut(BaseModel):
@@ -87,12 +111,12 @@ def _process_document(document_id: int) -> None:
 
 
 @router.get("", response_model=list[DocumentOut])
-def list_documents(_: str = Depends(require_auth)) -> list[DocumentOut]:
+def list_documents(_user: UserRow = Depends(require_user)) -> list[DocumentOut]:
     return [_to_out(d) for d in db.list_documents()]
 
 
 @router.get("/{document_id}", response_model=DocumentOut)
-def get_document(document_id: int, _: str = Depends(require_auth)) -> DocumentOut:
+def get_document(document_id: int, _user: UserRow = Depends(require_user)) -> DocumentOut:
     doc = db.get_document(document_id)
     if not doc:
         raise HTTPException(404, "Документ не найден")
@@ -100,18 +124,23 @@ def get_document(document_id: int, _: str = Depends(require_auth)) -> DocumentOu
 
 
 @router.get("/{document_id}/status", response_model=DocumentOut)
-def get_document_status(document_id: int, _: str = Depends(require_auth)) -> DocumentOut:
+def get_document_status(document_id: int, _user: UserRow = Depends(require_user)) -> DocumentOut:
     doc = db.get_document(document_id)
     if not doc:
         raise HTTPException(404, "Документ не найден")
     return _to_out(doc)
 
 
-@router.post("", response_model=UploadResponse, status_code=status.HTTP_202_ACCEPTED)
+@router.post(
+    "",
+    response_model=UploadResponse,
+    status_code=status.HTTP_202_ACCEPTED,
+    dependencies=[Depends(csrf_check)],
+)
 async def upload_documents(
     background: BackgroundTasks,
     files: list[UploadFile] = File(...),
-    _: str = Depends(require_auth),
+    actor: UserRow = Depends(require_admin),
 ) -> UploadResponse:
     if db.count_documents() + len(files) > settings.MAX_DOCUMENTS:
         raise HTTPException(
@@ -122,7 +151,7 @@ async def upload_documents(
     out: list[DocumentOut] = []
     max_bytes = settings.MAX_FILE_SIZE_MB * 1024 * 1024
     for upload in files:
-        original_name = upload.filename or "unnamed"
+        original_name = sanitize_filename(upload.filename or "unnamed")
         # Сначала сохраняем файл во временное место, чтобы определить тип
         tmp_dir = settings.uploads_path / "_tmp"
         tmp_dir.mkdir(parents=True, exist_ok=True)
@@ -159,6 +188,7 @@ async def upload_documents(
                 file_path="",
                 file_type=file_type,
                 file_size=file_size,
+                uploaded_by=actor.id,
             )
 
             target_dir = settings.uploads_path / str(doc_id)
@@ -186,8 +216,12 @@ async def upload_documents(
     return UploadResponse(documents=out)
 
 
-@router.delete("/{document_id}", status_code=status.HTTP_204_NO_CONTENT)
-def delete_document(document_id: int, _: str = Depends(require_auth)) -> None:
+@router.delete(
+    "/{document_id}",
+    status_code=status.HTTP_204_NO_CONTENT,
+    dependencies=[Depends(csrf_check)],
+)
+def delete_document(document_id: int, _actor: UserRow = Depends(require_admin)) -> None:
     doc = db.get_document(document_id)
     if not doc:
         raise HTTPException(404, "Документ не найден")

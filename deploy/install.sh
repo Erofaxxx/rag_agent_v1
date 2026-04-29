@@ -103,11 +103,17 @@ cat <<EOF
 Готово.
 
 Проверьте /etc/systemd/system/rag-agent.service и $APP_DIR/.env.
-Не забудьте сменить AUTH_PASSWORD и подставить OPENROUTER_API_KEY.
+Не забудьте проставить:
+  OPENROUTER_API_KEY
+  ADMIN_BOOTSTRAP_EMAIL
+  ADMIN_BOOTSTRAP_PASSWORD (минимум 10 символов, буква + цифра)
+
+После первого входа смените пароль админа через UI и обнулите
+ADMIN_BOOTSTRAP_PASSWORD в .env.
 
 Логи:           journalctl -u rag-agent -f
 Файл логов:     $DATA_DIR/logs/rag.log
 Перезапуск:     systemctl restart rag-agent
-Локально:       curl -u admin:PASSWORD http://127.0.0.1:8000/api/health
+Локально:       curl http://127.0.0.1:8000/api/health
 ============================================================
 EOF

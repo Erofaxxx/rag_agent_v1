@@ -19,7 +19,8 @@ CREATE TABLE IF NOT EXISTS documents (
     upload_date TEXT NOT NULL,
     status TEXT NOT NULL DEFAULT 'pending',
     error_message TEXT,
-    chunk_count INTEGER DEFAULT 0
+    chunk_count INTEGER DEFAULT 0,
+    uploaded_by INTEGER
 );
 
 CREATE TABLE IF NOT EXISTS chunks (
@@ -40,8 +41,11 @@ CREATE TABLE IF NOT EXISTS conversations (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     title TEXT,
     created_at TEXT NOT NULL,
-    updated_at TEXT NOT NULL
+    updated_at TEXT NOT NULL,
+    user_id INTEGER
 );
+
+CREATE INDEX IF NOT EXISTS idx_conversations_user ON conversations(user_id);
 
 CREATE TABLE IF NOT EXISTS messages (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -54,7 +58,65 @@ CREATE TABLE IF NOT EXISTS messages (
 );
 
 CREATE INDEX IF NOT EXISTS idx_messages_conversation_id ON messages(conversation_id);
+
+-- Аутентификация и пользователи
+CREATE TABLE IF NOT EXISTS users (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    email TEXT NOT NULL UNIQUE COLLATE NOCASE,
+    display_name TEXT,
+    password_hash TEXT NOT NULL,
+    role TEXT NOT NULL DEFAULT 'user',          -- 'admin' | 'user'
+    is_active INTEGER NOT NULL DEFAULT 0,        -- 1 = одобрен админом
+    failed_login_count INTEGER NOT NULL DEFAULT 0,
+    locked_until TEXT,                           -- ISO timestamp временного лока
+    created_at TEXT NOT NULL,
+    last_login_at TEXT,
+    last_login_ip TEXT
+);
+
+CREATE INDEX IF NOT EXISTS idx_users_role ON users(role);
+CREATE INDEX IF NOT EXISTS idx_users_active ON users(is_active);
+
+CREATE TABLE IF NOT EXISTS sessions (
+    token_hash TEXT PRIMARY KEY,                 -- sha256 от cookie value
+    user_id INTEGER NOT NULL,
+    created_at TEXT NOT NULL,
+    expires_at TEXT NOT NULL,
+    last_seen_at TEXT NOT NULL,
+    ip_address TEXT,
+    user_agent TEXT,
+    FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
+);
+
+CREATE INDEX IF NOT EXISTS idx_sessions_user ON sessions(user_id);
+CREATE INDEX IF NOT EXISTS idx_sessions_expires ON sessions(expires_at);
+
+CREATE TABLE IF NOT EXISTS auth_audit (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    user_id INTEGER,                             -- может быть NULL (login_fail на несуществующего)
+    actor_user_id INTEGER,                       -- кто инициировал (например, админ при approve)
+    event TEXT NOT NULL,                         -- 'register', 'login_success', 'login_fail',
+                                                 -- 'logout', 'approve', 'reject', 'role_change',
+                                                 -- 'lockout', 'unlock', 'delete_user', 'password_change'
+    details TEXT,
+    ip_address TEXT,
+    created_at TEXT NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_audit_user ON auth_audit(user_id);
+CREATE INDEX IF NOT EXISTS idx_audit_event ON auth_audit(event);
+CREATE INDEX IF NOT EXISTS idx_audit_created ON auth_audit(created_at);
 """
+
+# Дополнительные миграции для обратной совместимости с уже существующими БД
+MIGRATIONS = [
+    # (test_query, alter_query). test_query должен бросать исключение, если
+    # миграция нужна (например, отсутствует колонка).
+    ("SELECT user_id FROM conversations LIMIT 1",
+     "ALTER TABLE conversations ADD COLUMN user_id INTEGER"),
+    ("SELECT uploaded_by FROM documents LIMIT 1",
+     "ALTER TABLE documents ADD COLUMN uploaded_by INTEGER"),
+]
 
 
 @dataclass
@@ -100,6 +162,43 @@ class MessageRow:
     created_at: str
 
 
+@dataclass
+class UserRow:
+    id: int
+    email: str
+    display_name: Optional[str]
+    password_hash: str
+    role: str
+    is_active: bool
+    failed_login_count: int
+    locked_until: Optional[str]
+    created_at: str
+    last_login_at: Optional[str]
+    last_login_ip: Optional[str]
+
+
+@dataclass
+class SessionRow:
+    token_hash: str
+    user_id: int
+    created_at: str
+    expires_at: str
+    last_seen_at: str
+    ip_address: Optional[str]
+    user_agent: Optional[str]
+
+
+@dataclass
+class AuditRow:
+    id: int
+    user_id: Optional[int]
+    actor_user_id: Optional[int]
+    event: str
+    details: Optional[str]
+    ip_address: Optional[str]
+    created_at: str
+
+
 def _now() -> str:
     return datetime.now(timezone.utc).isoformat()
 
@@ -121,6 +220,15 @@ class Database:
         with self._lock:
             with self._connect() as conn:
                 conn.executescript(SCHEMA)
+                # Best-effort миграции для старых БД
+                for test_q, alter_q in MIGRATIONS:
+                    try:
+                        conn.execute(test_q)
+                    except sqlite3.OperationalError:
+                        try:
+                            conn.execute(alter_q)
+                        except sqlite3.OperationalError:
+                            pass  # колонка уже есть или таблицы ещё нет
 
     @contextmanager
     def cursor(self) -> Iterator[sqlite3.Cursor]:
@@ -145,13 +253,14 @@ class Database:
         file_path: str,
         file_type: str,
         file_size: int,
+        uploaded_by: Optional[int] = None,
     ) -> int:
         with self.cursor() as cur:
             cur.execute(
                 """INSERT INTO documents
-                   (filename, file_path, file_type, file_size, upload_date, status)
-                   VALUES (?, ?, ?, ?, ?, 'pending')""",
-                (filename, file_path, file_type, file_size, _now()),
+                   (filename, file_path, file_type, file_size, upload_date, status, uploaded_by)
+                   VALUES (?, ?, ?, ?, ?, 'pending', ?)""",
+                (filename, file_path, file_type, file_size, _now(), uploaded_by),
             )
             return int(cur.lastrowid)
 
@@ -237,18 +346,24 @@ class Database:
 
     # --- conversations / messages ---
 
-    def create_conversation(self, title: Optional[str] = None) -> int:
+    def create_conversation(self, title: Optional[str] = None, user_id: Optional[int] = None) -> int:
         now = _now()
         with self.cursor() as cur:
             cur.execute(
-                "INSERT INTO conversations (title, created_at, updated_at) VALUES (?, ?, ?)",
-                (title, now, now),
+                "INSERT INTO conversations (title, created_at, updated_at, user_id) VALUES (?, ?, ?, ?)",
+                (title, now, now, user_id),
             )
             return int(cur.lastrowid)
 
-    def list_conversations(self) -> list[ConversationRow]:
+    def list_conversations(self, user_id: Optional[int] = None) -> list[ConversationRow]:
         with self.cursor() as cur:
-            cur.execute("SELECT * FROM conversations ORDER BY updated_at DESC")
+            if user_id is not None:
+                cur.execute(
+                    "SELECT * FROM conversations WHERE user_id=? ORDER BY updated_at DESC",
+                    (user_id,),
+                )
+            else:
+                cur.execute("SELECT * FROM conversations ORDER BY updated_at DESC")
             return [_row_to_conversation(r) for r in cur.fetchall()]
 
     def get_conversation(self, conversation_id: int) -> Optional[ConversationRow]:
@@ -307,6 +422,174 @@ class Database:
                 )
             return [_row_to_message(r) for r in cur.fetchall()]
 
+    # ===== users =====
+
+    def create_user(
+        self,
+        email: str,
+        password_hash: str,
+        display_name: Optional[str] = None,
+        role: str = "user",
+        is_active: bool = False,
+    ) -> int:
+        with self.cursor() as cur:
+            cur.execute(
+                """INSERT INTO users
+                   (email, display_name, password_hash, role, is_active, created_at)
+                   VALUES (?, ?, ?, ?, ?, ?)""",
+                (email.strip().lower(), display_name, password_hash, role, 1 if is_active else 0, _now()),
+            )
+            return int(cur.lastrowid)
+
+    def get_user(self, user_id: int) -> Optional[UserRow]:
+        with self.cursor() as cur:
+            cur.execute("SELECT * FROM users WHERE id=?", (user_id,))
+            row = cur.fetchone()
+            return _row_to_user(row) if row else None
+
+    def get_user_by_email(self, email: str) -> Optional[UserRow]:
+        with self.cursor() as cur:
+            cur.execute("SELECT * FROM users WHERE email=? COLLATE NOCASE", (email.strip().lower(),))
+            row = cur.fetchone()
+            return _row_to_user(row) if row else None
+
+    def list_users(self) -> list[UserRow]:
+        with self.cursor() as cur:
+            cur.execute("SELECT * FROM users ORDER BY created_at DESC")
+            return [_row_to_user(r) for r in cur.fetchall()]
+
+    def count_users(self) -> int:
+        with self.cursor() as cur:
+            cur.execute("SELECT COUNT(*) AS c FROM users")
+            return int(cur.fetchone()["c"])
+
+    def update_user(
+        self,
+        user_id: int,
+        *,
+        is_active: Optional[bool] = None,
+        role: Optional[str] = None,
+        display_name: Optional[str] = None,
+        password_hash: Optional[str] = None,
+        failed_login_count: Optional[int] = None,
+        locked_until: Optional[str] = None,
+        last_login_at: Optional[str] = None,
+        last_login_ip: Optional[str] = None,
+        clear_locked_until: bool = False,
+    ) -> None:
+        fields: list[str] = []
+        values: list[Any] = []
+        if is_active is not None:
+            fields.append("is_active=?")
+            values.append(1 if is_active else 0)
+        if role is not None:
+            fields.append("role=?")
+            values.append(role)
+        if display_name is not None:
+            fields.append("display_name=?")
+            values.append(display_name)
+        if password_hash is not None:
+            fields.append("password_hash=?")
+            values.append(password_hash)
+        if failed_login_count is not None:
+            fields.append("failed_login_count=?")
+            values.append(failed_login_count)
+        if locked_until is not None:
+            fields.append("locked_until=?")
+            values.append(locked_until)
+        if clear_locked_until:
+            fields.append("locked_until=NULL")
+        if last_login_at is not None:
+            fields.append("last_login_at=?")
+            values.append(last_login_at)
+        if last_login_ip is not None:
+            fields.append("last_login_ip=?")
+            values.append(last_login_ip)
+        if not fields:
+            return
+        values.append(user_id)
+        with self.cursor() as cur:
+            cur.execute(f"UPDATE users SET {', '.join(fields)} WHERE id=?", values)
+
+    def delete_user(self, user_id: int) -> None:
+        with self.cursor() as cur:
+            cur.execute("DELETE FROM users WHERE id=?", (user_id,))
+
+    def count_admins_active(self) -> int:
+        with self.cursor() as cur:
+            cur.execute("SELECT COUNT(*) AS c FROM users WHERE role='admin' AND is_active=1")
+            return int(cur.fetchone()["c"])
+
+    # ===== sessions =====
+
+    def create_session(
+        self,
+        token_hash: str,
+        user_id: int,
+        expires_at: str,
+        ip_address: Optional[str] = None,
+        user_agent: Optional[str] = None,
+    ) -> None:
+        now = _now()
+        with self.cursor() as cur:
+            cur.execute(
+                """INSERT INTO sessions
+                   (token_hash, user_id, created_at, expires_at, last_seen_at, ip_address, user_agent)
+                   VALUES (?, ?, ?, ?, ?, ?, ?)""",
+                (token_hash, user_id, now, expires_at, now, ip_address, user_agent),
+            )
+
+    def get_session(self, token_hash: str) -> Optional[SessionRow]:
+        with self.cursor() as cur:
+            cur.execute("SELECT * FROM sessions WHERE token_hash=?", (token_hash,))
+            row = cur.fetchone()
+            return _row_to_session(row) if row else None
+
+    def touch_session(self, token_hash: str, ip_address: Optional[str] = None) -> None:
+        with self.cursor() as cur:
+            cur.execute(
+                "UPDATE sessions SET last_seen_at=?, ip_address=COALESCE(?, ip_address) WHERE token_hash=?",
+                (_now(), ip_address, token_hash),
+            )
+
+    def delete_session(self, token_hash: str) -> None:
+        with self.cursor() as cur:
+            cur.execute("DELETE FROM sessions WHERE token_hash=?", (token_hash,))
+
+    def delete_sessions_for_user(self, user_id: int) -> int:
+        with self.cursor() as cur:
+            cur.execute("DELETE FROM sessions WHERE user_id=?", (user_id,))
+            return cur.rowcount
+
+    def cleanup_expired_sessions(self) -> int:
+        with self.cursor() as cur:
+            cur.execute("DELETE FROM sessions WHERE expires_at < ?", (_now(),))
+            return cur.rowcount
+
+    # ===== audit =====
+
+    def log_audit(
+        self,
+        event: str,
+        *,
+        user_id: Optional[int] = None,
+        actor_user_id: Optional[int] = None,
+        details: Optional[str] = None,
+        ip_address: Optional[str] = None,
+    ) -> None:
+        with self.cursor() as cur:
+            cur.execute(
+                """INSERT INTO auth_audit
+                   (user_id, actor_user_id, event, details, ip_address, created_at)
+                   VALUES (?, ?, ?, ?, ?, ?)""",
+                (user_id, actor_user_id, event, details, ip_address, _now()),
+            )
+
+    def list_audit(self, limit: int = 200) -> list[AuditRow]:
+        with self.cursor() as cur:
+            cur.execute("SELECT * FROM auth_audit ORDER BY id DESC LIMIT ?", (limit,))
+            return [_row_to_audit(r) for r in cur.fetchall()]
+
 
 def _row_to_document(row: sqlite3.Row) -> DocumentRow:
     return DocumentRow(
@@ -363,6 +646,46 @@ def _row_to_message(row: sqlite3.Row) -> MessageRow:
         role=str(row["role"]),
         content=str(row["content"]),
         cited_chunks=cited,
+        created_at=str(row["created_at"]),
+    )
+
+
+def _row_to_user(row: sqlite3.Row) -> UserRow:
+    return UserRow(
+        id=int(row["id"]),
+        email=str(row["email"]),
+        display_name=row["display_name"],
+        password_hash=str(row["password_hash"]),
+        role=str(row["role"]),
+        is_active=bool(row["is_active"]),
+        failed_login_count=int(row["failed_login_count"] or 0),
+        locked_until=row["locked_until"],
+        created_at=str(row["created_at"]),
+        last_login_at=row["last_login_at"],
+        last_login_ip=row["last_login_ip"],
+    )
+
+
+def _row_to_session(row: sqlite3.Row) -> SessionRow:
+    return SessionRow(
+        token_hash=str(row["token_hash"]),
+        user_id=int(row["user_id"]),
+        created_at=str(row["created_at"]),
+        expires_at=str(row["expires_at"]),
+        last_seen_at=str(row["last_seen_at"]),
+        ip_address=row["ip_address"],
+        user_agent=row["user_agent"],
+    )
+
+
+def _row_to_audit(row: sqlite3.Row) -> AuditRow:
+    return AuditRow(
+        id=int(row["id"]),
+        user_id=row["user_id"],
+        actor_user_id=row["actor_user_id"],
+        event=str(row["event"]),
+        details=row["details"],
+        ip_address=row["ip_address"],
         created_at=str(row["created_at"]),
     )
 

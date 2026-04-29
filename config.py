@@ -14,9 +14,31 @@ class Settings(BaseSettings):
     OPENROUTER_HTTP_REFERER: str = "http://localhost"
     OPENROUTER_X_TITLE: str = "RAG Agent"
 
-    # Auth
-    AUTH_USERNAME: str = "admin"
-    AUTH_PASSWORD: str = "change_me_please"
+    # Auth / sessions
+    SESSION_COOKIE_NAME: str = "rag_session"
+    SESSION_LIFETIME_DAYS: int = 7
+    SESSION_COOKIE_SECURE: bool = True  # в dev (http://localhost) ставьте False
+    SESSION_COOKIE_SAMESITE: str = "lax"
+
+    # Bootstrap первого админа при первом запуске. Если в БД ещё нет ни одного
+    # пользователя, создаётся админ с этими credentials. Дальше — менять пароль
+    # через UI и больше не использовать ADMIN_BOOTSTRAP_PASSWORD.
+    ADMIN_BOOTSTRAP_EMAIL: str = ""
+    ADMIN_BOOTSTRAP_PASSWORD: str = ""
+
+    # CORS — список доменов через запятую. По умолчанию — same-origin only.
+    # Пример: CORS_ORIGINS=https://rag.example.com
+    CORS_ORIGINS: str = ""
+
+    # Регистрация
+    ALLOW_PUBLIC_REGISTRATION: bool = True
+    PASSWORD_MIN_LENGTH: int = 10
+
+    # Защита от перебора
+    LOGIN_MAX_FAILED_ATTEMPTS: int = 5
+    LOGIN_LOCKOUT_MINUTES: int = 15
+    RATE_LIMIT_LOGIN_PER_MINUTE: int = 10
+    RATE_LIMIT_REGISTER_PER_HOUR: int = 5
 
     # Paths
     DATA_DIR: str = "./data"

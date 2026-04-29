@@ -1,0 +1,256 @@
+/* Стили для login/register/pending/admin */
+@import url("/static/style.css");
+
+.auth-page {
+    min-height: 100vh;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    background: var(--bg);
+    padding: 24px;
+}
+
+.auth-card {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: var(--radius-lg);
+    padding: 40px 36px;
+    width: 100%;
+    max-width: 420px;
+    box-shadow: var(--shadow-lg);
+}
+
+.auth-logo {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    margin-bottom: 24px;
+}
+.auth-logo .logo-icon {
+    width: 40px;
+    height: 40px;
+    background: linear-gradient(135deg, var(--accent), #8b5cf6);
+    color: #fff;
+    border-radius: var(--radius);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+}
+.auth-logo .logo-icon svg { width: 22px; height: 22px; }
+.auth-logo h1 {
+    font-size: 18px;
+    font-weight: 700;
+}
+
+.auth-card h2 {
+    font-size: 22px;
+    font-weight: 700;
+    margin-bottom: 6px;
+}
+.auth-card .subtitle {
+    color: var(--text-secondary);
+    margin-bottom: 24px;
+    line-height: 1.5;
+    font-size: 13.5px;
+}
+
+.field {
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+    margin-bottom: 14px;
+}
+.field label {
+    font-size: 12.5px;
+    font-weight: 500;
+    color: var(--text-secondary);
+}
+.field input {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: var(--radius-sm);
+    padding: 10px 12px;
+    font-size: 14px;
+    transition: border-color .15s, box-shadow .15s;
+}
+.field input:focus {
+    outline: none;
+    border-color: var(--accent);
+    box-shadow: 0 0 0 3px var(--accent-soft);
+}
+.field-hint {
+    font-size: 11.5px;
+    color: var(--text-muted);
+}
+
+.password-meter {
+    display: flex;
+    gap: 3px;
+    margin-top: 4px;
+}
+.password-meter span {
+    flex: 1;
+    height: 4px;
+    border-radius: 2px;
+    background: var(--border);
+    transition: background .15s;
+}
+.password-meter.s1 span:nth-child(1) { background: var(--error); }
+.password-meter.s2 span:nth-child(-n+2) { background: var(--warning); }
+.password-meter.s3 span:nth-child(-n+3) { background: var(--accent); }
+.password-meter.s4 span { background: var(--success); }
+
+.btn-block {
+    width: 100%;
+    padding: 11px 16px;
+    font-size: 14px;
+    font-weight: 600;
+    margin-top: 6px;
+}
+
+.alert {
+    padding: 10px 12px;
+    border-radius: var(--radius-sm);
+    font-size: 13px;
+    margin-bottom: 14px;
+    line-height: 1.4;
+}
+.alert.error { background: var(--error-soft); color: var(--error); border: 1px solid #fca5a5; }
+.alert.success { background: var(--success-soft); color: var(--success); border: 1px solid #86efac; }
+.alert.warning { background: var(--warning-soft); color: var(--warning); border: 1px solid #fcd34d; }
+.alert.info { background: var(--accent-soft); color: var(--accent-strong); border: 1px solid #c7d2fe; }
+
+.auth-footer {
+    margin-top: 18px;
+    text-align: center;
+    font-size: 13px;
+    color: var(--text-secondary);
+}
+.auth-footer a { color: var(--accent); text-decoration: none; font-weight: 500; }
+.auth-footer a:hover { text-decoration: underline; }
+
+/* Admin page */
+.admin-shell {
+    min-height: 100vh;
+    background: var(--bg);
+}
+.admin-header {
+    background: var(--surface);
+    border-bottom: 1px solid var(--border);
+    padding: 14px 24px;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+}
+.admin-header h1 { font-size: 16px; font-weight: 600; }
+.admin-header-actions { display: flex; gap: 8px; align-items: center; }
+.admin-content {
+    padding: 24px;
+    max-width: 1200px;
+    margin: 0 auto;
+}
+.admin-tabs {
+    display: flex;
+    gap: 4px;
+    margin-bottom: 16px;
+    border-bottom: 1px solid var(--border);
+}
+.admin-tabs button {
+    background: transparent;
+    border: none;
+    padding: 10px 14px;
+    font-size: 13.5px;
+    color: var(--text-secondary);
+    cursor: pointer;
+    border-bottom: 2px solid transparent;
+    margin-bottom: -1px;
+    font-weight: 500;
+}
+.admin-tabs button.active {
+    color: var(--accent);
+    border-bottom-color: var(--accent);
+}
+
+.users-table {
+    width: 100%;
+    border-collapse: collapse;
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    overflow: hidden;
+}
+.users-table th, .users-table td {
+    padding: 12px 14px;
+    text-align: left;
+    border-bottom: 1px solid var(--border);
+    font-size: 13px;
+}
+.users-table th {
+    background: var(--surface-2);
+    font-weight: 600;
+    color: var(--text-secondary);
+    font-size: 11.5px;
+    text-transform: uppercase;
+    letter-spacing: .05em;
+}
+.users-table tr:last-child td { border-bottom: none; }
+.users-table tr:hover { background: var(--surface-2); }
+
+.role-badge {
+    display: inline-block;
+    padding: 2px 8px;
+    border-radius: 100px;
+    font-size: 11px;
+    font-weight: 600;
+}
+.role-badge.admin { background: var(--accent-soft); color: var(--accent-strong); }
+.role-badge.user { background: var(--surface-2); color: var(--text-secondary); }
+
+.status-pill {
+    display: inline-flex;
+    align-items: center;
+    gap: 5px;
+    padding: 3px 9px;
+    border-radius: 100px;
+    font-size: 11px;
+    font-weight: 600;
+}
+.status-pill.active { background: var(--success-soft); color: var(--success); }
+.status-pill.pending { background: var(--warning-soft); color: var(--warning); }
+.status-pill.locked { background: var(--error-soft); color: var(--error); }
+
+.btn-tiny {
+    padding: 4px 10px;
+    font-size: 12px;
+    border-radius: 4px;
+}
+
+.actions-cell {
+    display: flex;
+    gap: 4px;
+    flex-wrap: wrap;
+}
+
+.audit-list {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    overflow: hidden;
+}
+.audit-row {
+    padding: 10px 14px;
+    border-bottom: 1px solid var(--border);
+    display: grid;
+    grid-template-columns: 140px 120px 1fr 200px;
+    gap: 12px;
+    font-size: 12.5px;
+    align-items: center;
+}
+.audit-row:last-child { border-bottom: none; }
+.audit-row .audit-event {
+    font-weight: 600;
+    font-family: var(--font-mono);
+    font-size: 11.5px;
+    color: var(--accent-strong);
+}
+.audit-row .audit-time { color: var(--text-muted); font-size: 11.5px; }

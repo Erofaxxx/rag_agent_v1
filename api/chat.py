@@ -5,10 +5,10 @@ from fastapi import APIRouter, Depends, HTTPException
 from fastapi.concurrency import run_in_threadpool
 from pydantic import BaseModel, Field
 
-from api.auth import require_auth
+from auth.dependencies import csrf_check, require_user
 from config import settings
 from llm import answer_question
-from storage import db
+from storage import db, UserRow
 
 log = logging.getLogger(__name__)
 router = APIRouter(prefix="/api/chat", tags=["chat"])
@@ -37,8 +37,8 @@ class ChatResponse(BaseModel):
     cited_chunks: list[CitedChunk]
 
 
-@router.post("", response_model=ChatResponse)
-async def chat(req: ChatRequest, _: str = Depends(require_auth)) -> ChatResponse:
+@router.post("", response_model=ChatResponse, dependencies=[Depends(csrf_check)])
+async def chat(req: ChatRequest, user: UserRow = Depends(require_user)) -> ChatResponse:
     if not req.message.strip():
         raise HTTPException(400, "Пустое сообщение")
 
@@ -46,10 +46,13 @@ async def chat(req: ChatRequest, _: str = Depends(require_auth)) -> ChatResponse
         conv = db.get_conversation(req.conversation_id)
         if conv is None:
             raise HTTPException(404, "Диалог не найден")
+        # Изоляция: пользователь видит только свои диалоги. Админ — все.
+        if user.role != "admin" and conv.user_id is not None and conv.user_id != user.id:
+            raise HTTPException(404, "Диалог не найден")
         conversation_id = req.conversation_id
     else:
         title = req.message[:60]
-        conversation_id = db.create_conversation(title=title)
+        conversation_id = db.create_conversation(title=title, user_id=user.id)
 
     db.add_message(conversation_id, "user", req.message)
 
