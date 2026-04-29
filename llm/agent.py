@@ -1,4 +1,5 @@
 import logging
+import re
 import threading
 from typing import Any, Optional
 
@@ -10,6 +11,14 @@ from langgraph.prebuilt import create_react_agent
 from config import settings
 from llm.prompts import SYSTEM_PROMPT
 from search import search_service, SearchHit
+from storage import db
+
+
+# Tool-message в результате содержит блоки `[chunk_id=N] [source] [score=X.XXX]`.
+# В langgraph 0.2.x sync-тулы выполняются в отдельном thread у ToolNode, и
+# threading.local() из вызывающего потока туда не пробрасывается. Поэтому
+# вместо thread-local берём chunk_id напрямую из текста ToolMessage.
+_CITED_RE = re.compile(r"\[chunk_id=(\d+)\] \[([^\]]+)\] \[score=([0-9.]+)\]")
 
 log = logging.getLogger(__name__)
 
@@ -141,7 +150,7 @@ def _build_agent():
     return create_react_agent(
         model=llm,
         tools=[search_documents],
-        prompt=SYSTEM_PROMPT,
+        state_modifier=SYSTEM_PROMPT,
     )
 
 
@@ -270,7 +279,7 @@ def answer_question(
             answer = msg.content if isinstance(msg.content, str) else str(msg.content)
             break
 
-    cited = [
+    cited = _collect_cited(result["messages"]) or [
         {
             "chunk_id": h.chunk.id,
             "document_id": h.document.id,
@@ -285,3 +294,51 @@ def answer_question(
     ]
 
     return {"answer": answer, "cited_chunks": cited}
+
+
+def _collect_cited(messages: list) -> list[dict[str, Any]]:
+    """Собирает cited_chunks из ToolMessage-ов."""
+    scores: dict[int, float] = {}
+    order: list[int] = []
+    for msg in messages:
+        if not isinstance(msg, ToolMessage):
+            continue
+        text = msg.content if isinstance(msg.content, str) else str(msg.content)
+        for m in _CITED_RE.finditer(text):
+            cid = int(m.group(1))
+            score = float(m.group(3))
+            if cid not in scores:
+                order.append(cid)
+            scores[cid] = max(scores.get(cid, 0.0), score)
+
+    if not order:
+        return []
+
+    chunks = db.get_chunks_by_ids(order)
+    chunks_by_id = {c.id: c for c in chunks}
+    doc_ids = list({c.document_id for c in chunks})
+    docs: dict[int, Any] = {}
+    for did in doc_ids:
+        d = db.get_document(did)
+        if d:
+            docs[did] = d
+
+    out: list[dict[str, Any]] = []
+    for cid in order:
+        c = chunks_by_id.get(cid)
+        if c is None:
+            continue
+        doc = docs.get(c.document_id)
+        if doc is None:
+            continue
+        out.append({
+            "chunk_id": c.id,
+            "document_id": doc.id,
+            "filename": doc.filename,
+            "page_number": c.page_number,
+            "sheet_name": c.sheet_name,
+            "slide_number": c.slide_number,
+            "score": scores.get(cid, 0.0),
+            "snippet": c.text[:500],
+        })
+    return out
