@@ -69,7 +69,7 @@ def _process_document(document_id: int) -> None:
         log.info("Документ %s: %d чанков, эмбеддю...", document_id, len(chunks))
 
         texts = [c["text"] for c in chunks]
-        vectors = embedding_service.encode(texts)
+        vectors = embedding_service.encode_passages(texts)
         faiss_index.add(vectors, chunk_ids)
         faiss_index.persist()
         search_service.invalidate_bm25()

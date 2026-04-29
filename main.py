@@ -50,11 +50,18 @@ log = logging.getLogger(__name__)
 async def lifespan(app: FastAPI):
     log.info("Поднимаем RAG Agent")
     log.info("Data dir: %s", settings.data_path)
-    faiss_index.load_or_create()
+    # Сначала пробуем загрузить сохранённый FAISS-индекс с диска (если есть —
+    # размерность придёт из файла). Если файла нет, индекс создастся при первой
+    # вставке векторов с размерностью реальной модели.
+    faiss_index.load_from_disk()
     if os.environ.get("PRELOAD_EMBEDDINGS", "1") == "1":
-        log.info("Прогружаю модель эмбеддингов в память (займёт минуту)...")
+        log.info("Прогружаю модель эмбеддингов в память (займёт минуту при первом старте)...")
         embedding_service.load()
-    log.info("Готово, индекс содержит %d векторов", faiss_index.size)
+    log.info(
+        "Готово: %d векторов в индексе (model=%s)",
+        faiss_index.size,
+        settings.EMBEDDING_MODEL,
+    )
     yield
     log.info("Останавливаюсь")
 

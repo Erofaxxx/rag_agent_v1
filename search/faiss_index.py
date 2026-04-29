@@ -17,48 +17,58 @@ log = logging.getLogger(__name__)
 class FaissIndex:
     """Обёртка над FAISS IndexFlatIP внутри IndexIDMap2: поддерживает
     add_with_ids и remove_ids. Векторы нормализованы на стороне эмбеддера,
-    так что inner product == косинус."""
+    так что inner product == косинус.
 
-    def __init__(self, dim: int, path: Path) -> None:
-        self.dim = dim
+    Размерность определяется автоматически: либо из сохранённого индекса при
+    загрузке, либо из первого батча векторов при вставке. Это позволяет менять
+    модель эмбеддингов через .env без правки кода."""
+
+    def __init__(self, path: Path) -> None:
         self.path = path
         self._lock = threading.RLock()
         self._index: Optional[faiss.IndexIDMap2] = None
 
-    def load_or_create(self) -> None:
+    def load_from_disk(self) -> bool:
+        """Пробует загрузить сохранённый индекс. Возвращает True, если получилось."""
         with self._lock:
-            if self.path.exists():
-                try:
-                    self._index = faiss.read_index(str(self.path))
-                    log.info(
-                        "FAISS индекс загружен: %d векторов, dim=%d",
-                        self._index.ntotal,
-                        self.dim,
-                    )
-                    return
-                except Exception as e:
-                    log.error("Не удалось загрузить FAISS индекс: %s. Создаю новый.", e)
-            base = faiss.IndexFlatIP(self.dim)
-            self._index = faiss.IndexIDMap2(base)
-            log.info("Создан новый пустой FAISS индекс (dim=%d)", self.dim)
+            if not self.path.exists():
+                return False
+            try:
+                self._index = faiss.read_index(str(self.path))
+                log.info(
+                    "FAISS индекс загружен: %d векторов, dim=%d",
+                    self._index.ntotal,
+                    self._index.d,
+                )
+                return True
+            except Exception as e:
+                log.error("Не удалось загрузить FAISS индекс: %s", e)
+                return False
 
-    def _ensure(self) -> faiss.IndexIDMap2:
+    def _ensure_initialized(self, dim: int) -> faiss.IndexIDMap2:
         if self._index is None:
-            self.load_or_create()
-        assert self._index is not None
+            base = faiss.IndexFlatIP(dim)
+            self._index = faiss.IndexIDMap2(base)
+            log.info("Создан новый FAISS индекс (dim=%d)", dim)
+        elif self._index.d != dim:
+            raise RuntimeError(
+                f"Несовпадение размерности: индекс имеет dim={self._index.d}, "
+                f"а векторы — dim={dim}. Удалите {self.path} или верните прежнюю модель."
+            )
         return self._index
 
     def persist(self) -> None:
         with self._lock:
-            idx = self._ensure()
+            if self._index is None:
+                return
             self.path.parent.mkdir(parents=True, exist_ok=True)
-            faiss.write_index(idx, str(self.path))
+            faiss.write_index(self._index, str(self.path))
 
     def add(self, vectors: np.ndarray, ids: list[int]) -> None:
-        if len(ids) == 0:
+        if len(ids) == 0 or vectors.size == 0:
             return
         with self._lock:
-            idx = self._ensure()
+            idx = self._ensure_initialized(int(vectors.shape[1]))
             ids_arr = np.asarray(ids, dtype=np.int64)
             idx.add_with_ids(vectors.astype(np.float32), ids_arr)
 
@@ -66,17 +76,23 @@ class FaissIndex:
         if not ids:
             return 0
         with self._lock:
-            idx = self._ensure()
-            removed = idx.remove_ids(np.asarray(ids, dtype=np.int64))
-            return int(removed)
+            if self._index is None:
+                return 0
+            return int(self._index.remove_ids(np.asarray(ids, dtype=np.int64)))
 
     def search(self, query_vec: np.ndarray, k: int) -> list[tuple[int, float]]:
         with self._lock:
-            idx = self._ensure()
-            if idx.ntotal == 0:
+            if self._index is None or self._index.ntotal == 0:
                 return []
             q = np.asarray(query_vec, dtype=np.float32).reshape(1, -1)
-            scores, ids = idx.search(q, min(k, idx.ntotal))
+            if q.shape[1] != self._index.d:
+                log.error(
+                    "Запрос dim=%d не совпадает с индексом dim=%d",
+                    q.shape[1],
+                    self._index.d,
+                )
+                return []
+            scores, ids = self._index.search(q, min(k, self._index.ntotal))
             out: list[tuple[int, float]] = []
             for i, s in zip(ids[0].tolist(), scores[0].tolist()):
                 if i < 0:
@@ -87,10 +103,15 @@ class FaissIndex:
     @property
     def size(self) -> int:
         with self._lock:
-            return self._ensure().ntotal
+            return self._index.ntotal if self._index is not None else 0
+
+    @property
+    def dim(self) -> Optional[int]:
+        with self._lock:
+            return self._index.d if self._index is not None else None
 
 
-faiss_index = FaissIndex(dim=settings.EMBEDDING_DIM, path=settings.faiss_path)
+faiss_index = FaissIndex(path=settings.faiss_path)
 
 
 @dataclass
@@ -137,7 +158,7 @@ class SearchService:
         if not query.strip():
             return []
 
-        q_vec = embedding_service.encode_one(query)
+        q_vec = embedding_service.encode_query(query)
         dense_hits = faiss_index.search(q_vec, k=max(k, 15))
         scored: dict[int, float] = {}
         ranked_dense = [cid for cid, _ in dense_hits]

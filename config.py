@@ -22,10 +22,16 @@ class Settings(BaseSettings):
     DATA_DIR: str = "./data"
 
     # Embedding
+    # Default — BGE-M3 (~2 GB RAM, лучшее качество, dim=1024).
+    # LITE для серверов с 4 GB RAM: EMBEDDING_MODEL=intfloat/multilingual-e5-small
+    # (~500 MB RAM, dim=384, чуть хуже на длинных текстах). Для e5-моделей нужны
+    # префиксы "passage: " / "query: " — задаются ниже.
     EMBEDDING_MODEL: str = "BAAI/bge-m3"
     EMBEDDING_BATCH_SIZE: int = 16
     EMBEDDING_USE_FP16: bool = True
-    EMBEDDING_DIM: int = 1024
+    EMBEDDING_QUERY_PREFIX: str = ""
+    EMBEDDING_PASSAGE_PREFIX: str = ""
+    EMBEDDING_MAX_LENGTH: int = 8192
 
     # Chunking (в символах; русский текст ~3-4 символа на токен)
     CHUNK_SIZE: int = 2400

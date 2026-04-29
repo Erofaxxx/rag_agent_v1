@@ -22,10 +22,21 @@
 Полностью один процесс на одном сервере. Никаких внешних векторных БД,
 очередей и микросервисов.
 
+## Сколько ресурсов нужно
+
+| Конфиг сервера | Embedding-модель | Подходит? |
+|---|---|---|
+| **8 GB RAM, 2-4 vCPU, 40+ GB SSD** | BGE-M3 (default) | ✅ Рекомендуется. Лучшее качество. |
+| **4 GB RAM, 2 vCPU, 40 GB NVMe** | `intfloat/multilingual-e5-small` (LITE) | ✅ Работает. См. `.env.example` блок «LITE режим». |
+| **4 GB RAM, BGE-M3** | — | ❌ OOM при OCR/индексации больших файлов. |
+| **2 GB RAM** | любая | ❌ Не хватит даже на старт Python+FAISS+OS. |
+
+Конкретные тарифы для 1-2 пользователей: **Hetzner CX32 €4.50/мес** (4 vCPU ARM, 8 GB) с BGE-M3, или любой 4 GB VPS с LITE. Чтобы переключиться на LITE — раскомментируйте блок в `.env.example` вместо BGE-M3, удалите `data/faiss.index` (если был), перезапустите сервис.
+
 ## Быстрый старт на сервере (Ubuntu 24.04 LTS)
 
 Минимально рекомендуемый Droplet: **DigitalOcean s-4vcpu-8gb** (8 GB RAM,
-4 vCPU, 160 GB SSD), Frankfurt/Amsterdam.
+4 vCPU, 160 GB SSD), Frankfurt/Amsterdam. Альтернатива дешевле — **Hetzner CX32**.
 
 ```bash
 # 1. Клонируйте репозиторий
