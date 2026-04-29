@@ -105,15 +105,16 @@ def _process_document(document_id: int) -> None:
             time.time() - started,
             len(chunks),
         )
-        # Оригинал больше не нужен — текст и чанки уже в БД и FAISS, картинки
-        # были проигнорированы парсерами. Освобождаем диск (50 MB × 100 доков =
-        # 5 GB иначе). Если очень нужен оригинал — поставьте KEEP_ORIGINAL_FILES=true.
+        # Оригинал по умолчанию остаётся — нужен для перепарсинга при будущих
+        # апгрейдах парсера, для скачивания пользователем, для compliance.
+        # Удалить можно через KEEP_ORIGINAL_FILES=false в .env (если очень мало
+        # диска или жёсткие privacy-требования).
         if not settings.KEEP_ORIGINAL_FILES:
             try:
                 target_dir = Path(doc.file_path).parent
                 if target_dir.exists() and str(target_dir).startswith(str(settings.uploads_path)):
                     shutil.rmtree(target_dir, ignore_errors=True)
-                    log.debug("Удалён оригинал %s после успешной обработки", doc.file_path)
+                    log.debug("Удалён оригинал %s (KEEP_ORIGINAL_FILES=false)", doc.file_path)
             except Exception as e:
                 log.warning("Не удалось удалить оригинал %s: %s", doc.file_path, e)
     except Exception as e:
