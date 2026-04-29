@@ -236,15 +236,19 @@ async function switchNotebook(id) {
     renderNotebookSelector();
     closeSourcePanel();
     els.messages.innerHTML = "";
-    renderWelcome();
     els.chatTitle.textContent = "Новый диалог";
     els.chatSubtitle.textContent = "Задайте вопрос по документам ноутбука";
     els.renameChatBtn.disabled = true;
     els.deleteChatBtn.disabled = true;
+    // Сначала загружаем документы и чаты нового ноутбука, потом рендерим
+    // welcome — чтобы баннер «нет документов» отражал реальное состояние
+    // нового ноутбука, а не предыдущего.
     await Promise.all([loadConversations(), loadDocuments()]);
     // Открываем самый свежий чат в этом ноутбуке (если есть)
     if (state.conversations.length > 0) {
         await openConversation(state.conversations[0].id);
+    } else {
+        renderWelcome();
     }
 }
 
@@ -321,7 +325,8 @@ function closeNotebookDropdown() {
 
 // ============== Source viewer ==============
 
-// State текущего PDF-просмотра
+// State текущего PDF-просмотра.
+// scale=1.0 == 100% (PDF native), zoom-info показывает scale в процентах.
 const pdfState = {
     documentId: null,
     pdfDoc: null,           // pdfjsLib.PDFDocumentProxy
@@ -331,6 +336,9 @@ const pdfState = {
     snippet: "",            // текст цитаты для матчинга spans
     pageSpansCache: {},     // { [page]: { width, height, spans } }
 };
+
+const PDF_MIN_SCALE = 0.5;
+const PDF_MAX_SCALE = 4.0;
 
 async function ensurePdfJsWorker() {
     if (!window.pdfjsLib) {
@@ -394,7 +402,8 @@ async function openPdfWithHighlight(chunk) {
     await ensurePdfJsWorker();
 
     // Если уже открыт этот же документ — переиспользуем
-    if (pdfState.documentId !== chunk.document_id || !pdfState.pdfDoc) {
+    const sameDoc = pdfState.documentId === chunk.document_id && pdfState.pdfDoc;
+    if (!sameDoc) {
         // Очистка предыдущего
         if (pdfState.pdfDoc) {
             try { pdfState.pdfDoc.destroy(); } catch (_) {}
@@ -414,7 +423,13 @@ async function openPdfWithHighlight(chunk) {
     pdfState.snippet = chunk.snippet || "";
     pdfState.currentPage = Math.max(1, Math.min(chunk.page_number || 1, pdfState.totalPages));
 
-    await renderPdfPage();
+    // Для нового документа подбираем удобный масштаб — fit-to-width.
+    // При переходе между страницами того же документа сохраняем текущий зум.
+    if (!sameDoc) {
+        await fitPdfToWidth();
+    } else {
+        await renderPdfPage();
+    }
 }
 
 async function renderPdfPage() {
@@ -440,7 +455,7 @@ async function renderPdfPage() {
     document.getElementById("pdfPageInfo").textContent =
         `${pdfState.currentPage} / ${pdfState.totalPages}`;
     document.getElementById("pdfZoomInfo").textContent =
-        `${Math.round(pdfState.scale * 100 / 1.5)}%`;
+        `${Math.round(pdfState.scale * 100)}%`;
     document.getElementById("pdfPrevPage").disabled = pdfState.currentPage <= 1;
     document.getElementById("pdfNextPage").disabled = pdfState.currentPage >= pdfState.totalPages;
 
@@ -526,6 +541,26 @@ function escapeRegex(s) {
     return s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 }
 
+async function pdfZoom(delta, originX, originY) {
+    const oldScale = pdfState.scale;
+    const newScale = Math.max(PDF_MIN_SCALE, Math.min(PDF_MAX_SCALE, oldScale + delta));
+    if (newScale === oldScale) return;
+    const wrap = document.getElementById("pdfCanvasWrap");
+    // Зум вокруг точки курсора (или центра, если не передана): сохраняем
+    // относительную позицию того, что пользователь видит — иначе при увеличении
+    // картинка прыгает.
+    const ratio = newScale / oldScale;
+    const rect = wrap.getBoundingClientRect();
+    const cx = (typeof originX === "number" ? originX - rect.left : wrap.clientWidth / 2);
+    const cy = (typeof originY === "number" ? originY - rect.top : wrap.clientHeight / 2);
+    const sx = wrap.scrollLeft + cx;
+    const sy = wrap.scrollTop + cy;
+    pdfState.scale = newScale;
+    await renderPdfPage();
+    wrap.scrollLeft = sx * ratio - cx;
+    wrap.scrollTop = sy * ratio - cy;
+}
+
 function bindPdfControls() {
     document.getElementById("pdfPrevPage").addEventListener("click", async () => {
         if (pdfState.currentPage > 1) {
@@ -539,14 +574,66 @@ function bindPdfControls() {
             await renderPdfPage();
         }
     });
-    document.getElementById("pdfZoomIn").addEventListener("click", async () => {
-        pdfState.scale = Math.min(3, pdfState.scale + 0.25);
-        await renderPdfPage();
+    document.getElementById("pdfZoomIn").addEventListener("click", () => pdfZoom(+0.25));
+    document.getElementById("pdfZoomOut").addEventListener("click", () => pdfZoom(-0.25));
+
+    // Ctrl/Cmd + wheel — зум, как в обычном PDF-вьювере. Без модификатора
+    // оставляем нативный скролл страницы.
+    const wrap = document.getElementById("pdfCanvasWrap");
+    wrap.addEventListener("wheel", (e) => {
+        if (!(e.ctrlKey || e.metaKey)) return;
+        e.preventDefault();
+        const delta = e.deltaY < 0 ? +0.15 : -0.15;
+        pdfZoom(delta, e.clientX, e.clientY);
+    }, { passive: false });
+
+    // Клавиатурная навигация когда панель в фокусе или открыта.
+    document.addEventListener("keydown", async (e) => {
+        const panel = document.getElementById("sourcePanel");
+        if (!panel || panel.classList.contains("hidden")) return;
+        if (!pdfState.pdfDoc) return;
+        // Не перехватываем когда фокус в input/textarea
+        const tag = (document.activeElement && document.activeElement.tagName) || "";
+        if (tag === "INPUT" || tag === "TEXTAREA") return;
+        if (e.key === "ArrowLeft" || e.key === "PageUp") {
+            if (pdfState.currentPage > 1) {
+                pdfState.currentPage--;
+                await renderPdfPage();
+                e.preventDefault();
+            }
+        } else if (e.key === "ArrowRight" || e.key === "PageDown") {
+            if (pdfState.currentPage < pdfState.totalPages) {
+                pdfState.currentPage++;
+                await renderPdfPage();
+                e.preventDefault();
+            }
+        } else if ((e.ctrlKey || e.metaKey) && (e.key === "+" || e.key === "=")) {
+            await pdfZoom(+0.25);
+            e.preventDefault();
+        } else if ((e.ctrlKey || e.metaKey) && e.key === "-") {
+            await pdfZoom(-0.25);
+            e.preventDefault();
+        } else if ((e.ctrlKey || e.metaKey) && e.key === "0") {
+            // Reset to fit-width
+            await fitPdfToWidth();
+            e.preventDefault();
+        }
     });
-    document.getElementById("pdfZoomOut").addEventListener("click", async () => {
-        pdfState.scale = Math.max(0.5, pdfState.scale - 0.25);
-        await renderPdfPage();
-    });
+}
+
+// Подбор масштаба так, чтобы страница вписывалась по ширине в pdf-canvas-wrap.
+// Полезно при первом открытии PDF и по Ctrl+0.
+async function fitPdfToWidth() {
+    if (!pdfState.pdfDoc) return;
+    const page = await pdfState.pdfDoc.getPage(pdfState.currentPage);
+    const native = page.getViewport({ scale: 1 });
+    const wrap = document.getElementById("pdfCanvasWrap");
+    if (!wrap) return;
+    // -32 = padding 16px по бокам
+    const avail = Math.max(200, wrap.clientWidth - 32);
+    const target = Math.max(PDF_MIN_SCALE, Math.min(PDF_MAX_SCALE, avail / native.width));
+    pdfState.scale = target;
+    await renderPdfPage();
 }
 
 function closeSourcePanel() {
@@ -631,6 +718,16 @@ function renderConvItem(c) {
 async function openConversation(id) {
     try {
         const conv = await api(`/conversations/${id}`);
+        // Backend жёстко привязывает conversation к notebook при создании.
+        // Если открываем чат из другого notebook'а — синхронизируем UI, иначе
+        // selector врёт и при отправке нового сообщения юзер думает, что
+        // пишет в одном ноутбуке, а контекст поиска возьмётся из другого.
+        if (conv.notebook_id && conv.notebook_id !== state.notebookId) {
+            state.notebookId = conv.notebook_id;
+            rememberNotebook(conv.notebook_id);
+            renderNotebookSelector();
+            await loadDocuments();
+        }
         state.conversationId = conv.id;
         rememberConversation(conv.id);
         els.chatTitle.textContent = conv.title || `Диалог #${conv.id}`;
@@ -663,6 +760,13 @@ function startNewChat() {
 }
 
 function renderWelcome() {
+    const nb = state.notebooks.find(n => n.id === state.notebookId);
+    const nbName = nb ? nb.name : "Документы";
+    const docCount = state.documents.length;
+    const empty = docCount === 0;
+    const banner = empty
+        ? `<div class="welcome-warn">В ноутбуке «${escapeHtml(nbName)}» пока нет документов. Поиск ничего не найдёт, пока не загрузите файлы — или переключитесь на другой ноутбук в селекторе сверху слева.</div>`
+        : `<div class="welcome-context">Контекст: ноутбук «${escapeHtml(nbName)}», ${docCount} документ(ов).</div>`;
     els.messages.innerHTML = `
         <div class="welcome">
             <div class="welcome-icon">
@@ -670,6 +774,7 @@ function renderWelcome() {
             </div>
             <h1>RAG Agent</h1>
             <p>Загрузите документы (PDF, DOCX, XLSX, PPTX) и задавайте вопросы по их содержанию. Ответы строго по документам с цитатами на источник.</p>
+            ${banner}
             <div class="welcome-actions">
                 <button class="btn-primary" id="welcomeUploadBtn2">
                     <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="17 8 12 3 7 8"/><line x1="12" y1="3" x2="12" y2="15"/></svg>
