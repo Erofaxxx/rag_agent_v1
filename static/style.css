@@ -1189,6 +1189,16 @@ body.resizing-source iframe {
     color: var(--text-secondary);
 }
 
+/* `display: flex` (а также block/grid) у класса перекрывает `display:none`
+   из user-agent правила `[hidden]` — у них одинаковая специфичность и наш
+   стиль идёт позже. Без этого .pdf-viewer и .source-fallback продолжали
+   рендериться поверх друг друга при `hidden`, перехватывая клики/wheel.
+   Поэтому явно гасим скрытое состояние. */
+.pdf-viewer[hidden],
+.source-fallback[hidden],
+.source-html-viewer[hidden],
+.source-iframe[hidden] { display: none !important; }
+
 /* ===== PDF viewer (custom, with bbox highlights) ===== */
 .pdf-viewer {
     position: absolute;
