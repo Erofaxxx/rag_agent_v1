@@ -402,6 +402,8 @@ function showSource(chunk) {
         htmlViewer.innerHTML = '<div class="pdf-loading">Загрузка…</div>';
         renderHtmlSource(chunk, ext, fileUrl).catch(err => {
             console.error("HTML viewer error:", err);
+            // Дублируем в toast чтобы пользователь видел причину без DevTools.
+            try { toast(`Просмотр документа: ${err.message}`, "error"); } catch (_) {}
             htmlViewer.hidden = true;
             fallback.hidden = false;
             fallbackText.textContent = `Не удалось открыть просмотр (${err.message}). Скачайте оригинал.`;
