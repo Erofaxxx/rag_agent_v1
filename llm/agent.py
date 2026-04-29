@@ -218,6 +218,23 @@ def _truncate_history(history: list[dict[str, str]], limit: int) -> list[dict[st
     return cut
 
 
+_INLINE_CITE_RE = re.compile(
+    r"\[[^\]]*\.(?:pdf|docx?|xlsx?|pptx|md|markdown|txt|csv)[^\]]*\]",
+    re.IGNORECASE,
+)
+
+
+def _strip_inline_citations(text: str) -> str:
+    """Удаляет из текста ассистента inline-цитаты вида `[file.docx, стр. 23]`.
+
+    Без этого LLM, видя в истории свой предыдущий ответ с такими маркерами,
+    лениво рехэширует их без вызова search_documents и тащит за собой
+    выдуманные номера страниц. Цитаты мы и так показываем юзеру отдельным
+    блоком из cited_chunks — в текст истории они не нужны.
+    """
+    return _INLINE_CITE_RE.sub("", text or "")
+
+
 def _to_lc_messages(history: list[dict[str, str]]) -> list[Any]:
     out: list[Any] = []
     for m in history:
@@ -226,7 +243,8 @@ def _to_lc_messages(history: list[dict[str, str]]) -> list[Any]:
         if role == "user":
             out.append(HumanMessage(content=content))
         elif role == "assistant":
-            out.append(AIMessage(content=content))
+            # Из ответов ассистента вычищаем inline-цитаты — они для UI, не для LLM.
+            out.append(AIMessage(content=_strip_inline_citations(content)))
         elif role == "system":
             out.append(SystemMessage(content=content))
     return out
