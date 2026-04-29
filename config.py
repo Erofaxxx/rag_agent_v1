@@ -92,6 +92,11 @@ class Settings(BaseSettings):
     MAX_DOCUMENTS: int = 100
     MAX_HISTORY_MESSAGES: int = 8
 
+    # После успешного парсинга оригинал файла удаляется (текст и чанки уже в БД,
+    # картинки игнорируются — хранить большие бинарники нет смысла).
+    # При status='error' оригинал остаётся для отладки.
+    KEEP_ORIGINAL_FILES: bool = False
+
     # Server
     HOST: str = "0.0.0.0"
     PORT: int = 8000

@@ -221,6 +221,110 @@ function renderAudit(items) {
     }
 }
 
+// ---------- DB browser ----------
+
+const dbState = {
+    tables: [],
+    currentTable: null,
+    limit: 50,
+    offset: 0,
+};
+
+async function loadDbTables() {
+    try {
+        const data = await api("/admin/db/tables");
+        dbState.tables = data.tables || [];
+        renderDbTables();
+    } catch (e) {
+        showAlert("Ошибка БД: " + e.message);
+    }
+}
+
+function renderDbTables() {
+    const wrap = document.getElementById("dbTables");
+    wrap.innerHTML = "";
+    for (const t of dbState.tables) {
+        const btn = document.createElement("button");
+        btn.className = "db-table-btn";
+        if (t.name === dbState.currentTable) btn.classList.add("active");
+        btn.innerHTML = `
+            <span class="db-table-name">${escHtml(t.name)}</span>
+            <span class="db-table-count">${t.rows}</span>
+        `;
+        btn.addEventListener("click", () => loadDbTable(t.name, 0));
+        wrap.appendChild(btn);
+    }
+}
+
+async function loadDbTable(name, offset) {
+    dbState.currentTable = name;
+    dbState.offset = offset;
+    renderDbTables();
+    document.getElementById("dbMeta").textContent = `Загружаю ${name}...`;
+    try {
+        const data = await api(`/admin/db/${encodeURIComponent(name)}?limit=${dbState.limit}&offset=${offset}`);
+        renderDbContent(data);
+    } catch (e) {
+        document.getElementById("dbMeta").textContent = "Ошибка: " + e.message;
+    }
+}
+
+function renderDbContent(data) {
+    const meta = document.getElementById("dbMeta");
+    const from = data.total === 0 ? 0 : data.offset + 1;
+    const to = Math.min(data.offset + data.rows.length, data.total);
+    meta.innerHTML = `
+        <strong>${escHtml(data.table)}</strong> ·
+        <span style="color:var(--text-muted);">${from}–${to} из ${data.total}</span>
+    `;
+
+    const tbl = document.getElementById("dbContent");
+    tbl.innerHTML = "";
+    if (!data.rows.length) {
+        const tr = document.createElement("tr");
+        tr.innerHTML = `<td colspan="${data.columns.length}" style="text-align:center; color:var(--text-muted); padding:24px;">Пусто</td>`;
+        tbl.appendChild(tr);
+    } else {
+        const thead = document.createElement("thead");
+        const trh = document.createElement("tr");
+        for (const col of data.columns) {
+            const th = document.createElement("th");
+            th.textContent = col;
+            trh.appendChild(th);
+        }
+        thead.appendChild(trh);
+        tbl.appendChild(thead);
+
+        const tbody = document.createElement("tbody");
+        for (const row of data.rows) {
+            const tr = document.createElement("tr");
+            for (const v of row) {
+                const td = document.createElement("td");
+                if (v === null) {
+                    td.innerHTML = '<span class="db-null">NULL</span>';
+                } else {
+                    const s = String(v);
+                    td.textContent = s.length > 200 ? s.slice(0, 200) + "…" : s;
+                    td.title = s;
+                }
+                tr.appendChild(td);
+            }
+            tbody.appendChild(tr);
+        }
+        tbl.appendChild(tbody);
+    }
+
+    const pag = document.getElementById("dbPagination");
+    if (data.total > data.limit) {
+        pag.hidden = false;
+        document.getElementById("dbPrev").disabled = data.offset === 0;
+        document.getElementById("dbNext").disabled = data.offset + data.rows.length >= data.total;
+        document.getElementById("dbPageInfo").textContent = `${from}–${to} / ${data.total}`;
+    } else {
+        pag.hidden = true;
+    }
+}
+
 // ---------- Tabs ----------
 
 function showTab(name) {
@@ -229,7 +333,9 @@ function showTab(name) {
     });
     document.getElementById("tabUsers").style.display = name === "users" ? "" : "none";
     document.getElementById("tabAudit").style.display = name === "audit" ? "" : "none";
+    document.getElementById("tabDb").style.display = name === "db" ? "" : "none";
     if (name === "audit") loadAudit();
+    if (name === "db") loadDbTables();
 }
 
 async function initAdmin() {
@@ -239,6 +345,18 @@ async function initAdmin() {
     document.getElementById("reloadBtn").addEventListener("click", loadUsers);
     document.getElementById("reloadAuditBtn").addEventListener("click", loadAudit);
     document.getElementById("userSearch").addEventListener("input", renderUsers);
+    document.getElementById("dbPrev").addEventListener("click", () => {
+        if (dbState.currentTable) loadDbTable(dbState.currentTable, Math.max(0, dbState.offset - dbState.limit));
+    });
+    document.getElementById("dbNext").addEventListener("click", () => {
+        if (dbState.currentTable) loadDbTable(dbState.currentTable, dbState.offset + dbState.limit);
+    });
+    const themeBtn = document.getElementById("themeToggleBtn");
+    if (themeBtn) {
+        themeBtn.addEventListener("click", () => {
+            if (window.RagTheme) window.RagTheme.toggle();
+        });
+    }
     document.getElementById("logoutBtn").addEventListener("click", async () => {
         try { await api("/auth/logout", { method: "POST" }); } catch (_) {}
         location.href = "/login";

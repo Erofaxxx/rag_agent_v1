@@ -262,3 +262,141 @@ def list_audit(limit: int = 200, _actor: UserRow = Depends(require_admin)) -> li
         )
         for r in db.list_audit(limit=limit)
     ]
+
+
+# ===== DB browser (read-only) =====
+# Безопасность: НЕ позволяем произвольный SQL. Только белый список таблиц с
+# фиксированным набором колонок и обязательным удалением чувствительных полей
+# (password_hash, token_hash целиком).
+
+_DB_TABLES: dict[str, dict] = {
+    "documents": {
+        "columns": ["id", "filename", "file_type", "file_size", "upload_date",
+                    "status", "error_message", "chunk_count", "uploaded_by"],
+        "default_order": "id DESC",
+    },
+    "chunks": {
+        # text может быть длинным — обрежем при выдаче
+        "columns": ["id", "document_id", "chunk_index", "page_number",
+                    "sheet_name", "slide_number", "substr(text, 1, 200) AS text_preview"],
+        "default_order": "id DESC",
+        "raw_select": True,
+    },
+    "conversations": {
+        "columns": ["id", "title", "user_id", "created_at", "updated_at"],
+        "default_order": "updated_at DESC",
+    },
+    "messages": {
+        "columns": ["id", "conversation_id", "role",
+                    "substr(content, 1, 200) AS content_preview", "created_at"],
+        "default_order": "id DESC",
+        "raw_select": True,
+    },
+    "users": {
+        # password_hash НЕ возвращаем
+        "columns": ["id", "email", "display_name", "role", "is_active",
+                    "failed_login_count", "locked_until", "created_at",
+                    "last_login_at", "last_login_ip"],
+        "default_order": "created_at DESC",
+    },
+    "sessions": {
+        # token_hash сокращаем чтобы по нему нельзя было собрать токен
+        "columns": ["substr(token_hash, 1, 12) || '...' AS token_prefix",
+                    "user_id", "created_at", "expires_at", "last_seen_at",
+                    "ip_address", "substr(user_agent, 1, 80) AS user_agent_short"],
+        "default_order": "created_at DESC",
+        "raw_select": True,
+    },
+    "auth_audit": {
+        "columns": ["id", "user_id", "actor_user_id", "event",
+                    "details", "ip_address", "created_at"],
+        "default_order": "id DESC",
+    },
+}
+
+
+class DbTablesOut(BaseModel):
+    tables: list[dict]
+
+
+class DbRowsOut(BaseModel):
+    table: str
+    columns: list[str]
+    rows: list[list]
+    total: int
+    limit: int
+    offset: int
+
+
+@router.get("/db/tables", response_model=DbTablesOut)
+def db_list_tables(_actor: UserRow = Depends(require_admin)) -> DbTablesOut:
+    out = []
+    with db.cursor() as cur:
+        for name in _DB_TABLES.keys():
+            try:
+                cur.execute(f"SELECT COUNT(*) AS c FROM {name}")
+                count = int(cur.fetchone()["c"])
+            except Exception:
+                count = 0
+            out.append({"name": name, "rows": count})
+    return DbTablesOut(tables=out)
+
+
+@router.get("/db/{table}", response_model=DbRowsOut)
+def db_browse_table(
+    table: str,
+    limit: int = 50,
+    offset: int = 0,
+    _actor: UserRow = Depends(require_admin),
+) -> DbRowsOut:
+    if table not in _DB_TABLES:
+        raise HTTPException(404, f"Таблица '{table}' не доступна для просмотра")
+    spec = _DB_TABLES[table]
+    limit = max(1, min(limit, 500))
+    offset = max(0, offset)
+
+    columns = spec["columns"]
+    select_list = ", ".join(columns)
+    order = spec["default_order"]
+
+    with db.cursor() as cur:
+        cur.execute(f"SELECT COUNT(*) AS c FROM {table}")
+        total = int(cur.fetchone()["c"])
+        cur.execute(
+            f"SELECT {select_list} FROM {table} ORDER BY {order} LIMIT ? OFFSET ?",
+            (limit, offset),
+        )
+        rows = cur.fetchall()
+
+    # Извлекаем имена колонок из spec (без AS-выражений)
+    display_cols = [_strip_alias(c) for c in columns]
+
+    out_rows = []
+    for r in rows:
+        out_rows.append([_safe_value(r[i]) for i in range(len(display_cols))])
+
+    return DbRowsOut(
+        table=table,
+        columns=display_cols,
+        rows=out_rows,
+        total=total,
+        limit=limit,
+        offset=offset,
+    )
+
+
+def _strip_alias(col_expr: str) -> str:
+    """'substr(text, 1, 200) AS text_preview' → 'text_preview'"""
+    upper = col_expr.upper()
+    if " AS " in upper:
+        idx = upper.rfind(" AS ")
+        return col_expr[idx + 4:].strip()
+    return col_expr.strip()
+
+
+def _safe_value(v):
+    if v is None:
+        return None
+    if isinstance(v, (str, int, float, bool)):
+        return v
+    return str(v)

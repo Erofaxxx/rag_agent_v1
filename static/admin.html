@@ -7,6 +7,7 @@
     <link rel="preconnect" href="https://fonts.googleapis.com">
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
     <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
+    <script src="/static/theme.js"></script>
     <link rel="stylesheet" href="/static/auth.css">
 </head>
 <body>
@@ -21,6 +22,7 @@
                 </div>
             </div>
             <div class="admin-header-actions">
+                <button id="themeToggleBtn" class="btn-secondary btn-tiny" title="Переключить тему">Тема</button>
                 <a href="/" class="btn-secondary btn-tiny" style="text-decoration:none;">К чату</a>
                 <button id="logoutBtn" class="btn-secondary btn-tiny">Выйти</button>
             </div>
@@ -32,6 +34,7 @@
             <div class="admin-tabs">
                 <button class="active" data-tab="users">Пользователи</button>
                 <button data-tab="audit">Журнал событий</button>
+                <button data-tab="db">База данных</button>
             </div>
 
             <section id="tabUsers">
@@ -60,6 +63,23 @@
                     <button id="reloadAuditBtn" class="btn-secondary btn-tiny">Обновить</button>
                 </div>
                 <div id="auditList" class="audit-list"></div>
+            </section>
+
+            <section id="tabDb" style="display:none;">
+                <div class="db-toolbar">
+                    <div class="db-tables" id="dbTables"></div>
+                </div>
+                <div class="db-meta" id="dbMeta">
+                    Выберите таблицу слева, чтобы посмотреть содержимое (read-only).
+                </div>
+                <div class="db-table-wrap">
+                    <table class="db-table" id="dbContent"></table>
+                </div>
+                <div class="db-pagination" id="dbPagination" hidden>
+                    <button class="btn-secondary btn-tiny" id="dbPrev">← Назад</button>
+                    <span id="dbPageInfo"></span>
+                    <button class="btn-secondary btn-tiny" id="dbNext">Вперёд →</button>
+                </div>
             </section>
         </div>
     </div>

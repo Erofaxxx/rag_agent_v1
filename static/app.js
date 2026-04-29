@@ -772,6 +772,12 @@ function bindUserMenu() {
         try { await api("/auth/logout", { method: "POST" }); } catch (_) {}
         location.href = "/login";
     });
+    document.getElementById("themeToggleBtn").addEventListener("click", () => {
+        if (window.RagTheme) {
+            const next = window.RagTheme.toggle();
+            toast(next === "light" ? "Светлая тема" : "Тёмная тема");
+        }
+    });
     document.getElementById("changePasswordBtn").addEventListener("click", async () => {
         const cur = prompt("Текущий пароль:");
         if (!cur) return;
@@ -822,12 +828,24 @@ async function init() {
     // Параллельно: чаты и документы
     await Promise.all([loadConversations(), loadDocuments()]);
 
-    // Восстановить последний открытый чат: если юзер закрыл вкладку посреди
-    // диалога с агентом, ответ всё равно дописался в БД (asyncio.shield на
-    // бэкенде), и здесь мы откроем тот же чат и подтянем последнее сообщение.
+    // Восстановить последний открытый чат. Логика приоритета:
+    //   1) localStorage — последний открытый юзером чат (быстро, не дёргает API);
+    //   2) если localStorage пуст или ID невалиден — открываем самый свежий
+    //      из state.conversations (они отсортированы по updated_at DESC на сервере).
+    //      Это спасает кейс «юзер закрыл ноут на день, localStorage очистился,
+    //      но ответ от LLM пришёл и записан в БД через asyncio.shield».
+    //
+    // Так работает ChatGPT и большинство чатов: при возврате видишь последний
+    // активный диалог.
     const lastId = recallConversation();
+    let resumeId = null;
     if (lastId && state.conversations.some(c => c.id === lastId)) {
-        await openConversation(lastId);
+        resumeId = lastId;
+    } else if (state.conversations.length > 0) {
+        resumeId = state.conversations[0].id;
+    }
+    if (resumeId) {
+        await openConversation(resumeId);
     }
 
     // Каждые 60s обновляем статусы документов

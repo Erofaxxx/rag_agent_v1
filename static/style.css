@@ -1,8 +1,65 @@
 /* ===== Reset & Base ===== */
 *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
 
+/* === Палитра ===
+   Дефолтная — тёмная (как просил пользователь). Светлая через
+   :root[data-theme="light"]. Переключатель в user-menu пишет в localStorage,
+   theme.js применяет атрибут до рендера body.
+*/
 :root {
-    /* Палитра */
+    /* Тёмная (default) */
+    --bg: #0d0d0d;
+    --surface: #181818;
+    --surface-2: #131313;
+    --surface-hover: #232323;
+    --border: #262626;
+    --border-strong: #3a3a3a;
+
+    --text: #f0f0ef;
+    --text-secondary: #b3b3b1;
+    --text-muted: #757575;
+
+    --accent: #818cf8;
+    --accent-hover: #a5b4fc;
+    --accent-soft: rgba(129, 140, 248, 0.15);
+    --accent-strong: #c7d2fe;
+
+    --success: #22c55e;
+    --success-soft: rgba(34, 197, 94, 0.18);
+    --error: #ef4444;
+    --error-soft: rgba(239, 68, 68, 0.18);
+    --warning: #eab308;
+    --warning-soft: rgba(234, 179, 8, 0.18);
+
+    /* User msg — тот же accent но плотнее */
+    --user-msg-bg: var(--accent);
+    --user-msg-text: #ffffff;
+
+    /* Типографика */
+    --font: "Inter", -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+    --font-mono: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, monospace;
+
+    /* Скругления и тени */
+    --radius-sm: 6px;
+    --radius: 10px;
+    --radius-lg: 14px;
+    --radius-xl: 20px;
+
+    /* В тёмной теме тени менее заметны — используем тонкие границы */
+    --shadow-sm: 0 1px 2px rgba(0, 0, 0, 0.4);
+    --shadow: 0 4px 12px rgba(0, 0, 0, 0.4), 0 1px 3px rgba(0, 0, 0, 0.3);
+    --shadow-lg: 0 16px 32px rgba(0, 0, 0, 0.5), 0 4px 8px rgba(0, 0, 0, 0.4);
+
+    /* Размеры */
+    --sidebar-w: 280px;
+    --docs-w: 340px;
+    --header-h: 64px;
+
+    /* Цветовая схема для системных контролов (scrollbar и т.п.) */
+    color-scheme: dark;
+}
+
+:root[data-theme="light"] {
     --bg: #f7f7f5;
     --surface: #ffffff;
     --surface-2: #fafaf9;
@@ -26,24 +83,14 @@
     --warning: #d97706;
     --warning-soft: #fef3c7;
 
-    /* Типографика */
-    --font: "Inter", -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
-    --font-mono: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, monospace;
-
-    /* Скругления и тени */
-    --radius-sm: 6px;
-    --radius: 10px;
-    --radius-lg: 14px;
-    --radius-xl: 20px;
+    --user-msg-bg: var(--accent);
+    --user-msg-text: #ffffff;
 
     --shadow-sm: 0 1px 2px rgba(0, 0, 0, 0.05);
     --shadow: 0 4px 12px rgba(0, 0, 0, 0.06), 0 1px 3px rgba(0, 0, 0, 0.04);
     --shadow-lg: 0 16px 32px rgba(0, 0, 0, 0.10), 0 4px 8px rgba(0, 0, 0, 0.06);
 
-    /* Размеры */
-    --sidebar-w: 280px;
-    --docs-w: 340px;
-    --header-h: 64px;
+    color-scheme: light;
 }
 
 html, body {
@@ -398,7 +445,7 @@ body.role-user #welcomeUploadBtn2 { display: none !important; }
 .message-row.error .message {
     background: var(--error-soft);
     color: var(--error);
-    border: 1px solid #fca5a5;
+    border: 1px solid var(--error);
     margin: 0 auto;
 }
 .message-row.thinking .message {
@@ -437,7 +484,8 @@ body.role-user #welcomeUploadBtn2 { display: none !important; }
 .message ul, .message ol { padding-left: 22px; margin: 4px 0 8px; }
 .message li { margin-bottom: 4px; }
 .message code {
-    background: rgba(0, 0, 0, 0.06);
+    background: var(--surface-hover);
+    border: 1px solid var(--border);
     padding: 1px 5px;
     border-radius: 4px;
     font-family: var(--font-mono);

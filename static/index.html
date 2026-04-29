@@ -7,6 +7,7 @@
     <link rel="preconnect" href="https://fonts.googleapis.com">
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
     <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
+    <script src="/static/theme.js"></script>
     <link rel="stylesheet" href="/static/style.css">
     <!-- marked + DOMPurify: рендерим markdown ассистента и санитизируем HTML.
          CSP ограничивает источники скриптов до 'self' + jsdelivr.net. -->
@@ -41,6 +42,7 @@
                         </button>
                         <div class="user-menu-dropdown" id="userMenuDropdown" hidden>
                             <a id="adminLink" href="/admin" hidden>Админ-панель</a>
+                            <button id="themeToggleBtn">Сменить тему</button>
                             <button id="changePasswordBtn">Сменить пароль</button>
                             <button id="logoutBtn">Выйти</button>
                         </div>
