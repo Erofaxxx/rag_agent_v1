@@ -171,6 +171,7 @@
 
     <!-- Боковая панель source viewer (PDF в iframe + сниппет цитаты) -->
     <aside id="sourcePanel" class="source-panel hidden">
+        <div id="sourceResizer" class="source-resizer" title="Перетащите чтобы изменить ширину"></div>
         <div class="source-header">
             <div class="source-title-block">
                 <h3 id="sourceTitle"></h3>
@@ -213,7 +214,10 @@
                     </div>
                 </div>
             </div>
-            <!-- Fallback (не-PDF) -->
+            <!-- HTML-вьюер для DOCX/MD/TXT/CSV: содержимое рендерится через
+                 DOMPurify+marked.js, плюс serif-шрифт под текстовый документ. -->
+            <div id="sourceHtmlViewer" class="source-html-viewer" hidden></div>
+            <!-- Fallback iframe для совсем экзотики (если когда-нибудь будет нужен) -->
             <iframe id="sourceIframe" class="source-iframe" title="Source preview" hidden></iframe>
             <div id="sourceFallback" class="source-fallback" hidden>
                 <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/></svg>

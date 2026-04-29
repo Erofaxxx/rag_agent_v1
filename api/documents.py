@@ -244,6 +244,49 @@ def get_document_file(document_id: int, user: UserRow = Depends(require_user)):
     )
 
 
+@router.get("/{document_id}/html")
+def get_document_html(document_id: int, user: UserRow = Depends(require_user)) -> dict[str, Any]:
+    """Конвертирует не-PDF документы в HTML/markdown/text для рендеринга в
+    боковой панели. PDF имеет свой канвас-вьюер с подсветкой bbox, для других
+    форматов раньше был iframe с FileResponse, но Word/Excel/Markdown в iframe
+    показываются как «скачать или сырой текст».
+
+    DOCX/DOC → mammoth (заголовки, списки, таблицы сохраняются).
+    MD/MARKDOWN → возвращаем raw markdown (фронт уже умеет marked.js).
+    TXT/CSV → plain text, фронт обернёт в <pre> с HTML-экранированием.
+    Остальное — 415: фронт показывает fallback с кнопкой «скачать».
+    """
+    doc = db.get_document(document_id)
+    if not doc or not _can_access(doc, user):
+        raise HTTPException(404, "Документ не найден")
+    if not doc.file_path:
+        raise HTTPException(404, "Оригинал не сохранён")
+    p = Path(doc.file_path)
+    if not p.exists():
+        raise HTTPException(404, "Файл не найден на диске")
+    if not str(p.resolve()).startswith(str(settings.uploads_path.resolve())):
+        raise HTTPException(403, "Доступ запрещён")
+
+    ft = (doc.file_type or "").lower()
+    try:
+        if ft in ("docx", "doc"):
+            import mammoth
+            with open(p, "rb") as f:
+                result = mammoth.convert_to_html(f)
+            return {"format": "html", "content": result.value}
+        if ft in ("md", "markdown"):
+            text = p.read_text(encoding="utf-8", errors="replace")
+            return {"format": "markdown", "content": text}
+        if ft in ("txt", "csv"):
+            text = p.read_text(encoding="utf-8", errors="replace")
+            return {"format": "text", "content": text}
+    except Exception as e:
+        log.exception("Ошибка конвертации документа %s в HTML: %s", document_id, e)
+        raise HTTPException(500, f"Не удалось подготовить просмотр: {e}")
+
+    raise HTTPException(415, f"Просмотр для типа {ft!r} не поддерживается")
+
+
 @router.post(
     "",
     response_model=UploadResponse,

@@ -9,7 +9,7 @@ from langchain_openai import ChatOpenAI
 from langgraph.prebuilt import create_react_agent
 
 from config import settings
-from llm.prompts import SYSTEM_PROMPT
+from llm.prompts import SYSTEM_PROMPT, build_system_prompt
 from search import search_service, SearchHit
 from storage import db
 
@@ -147,10 +147,12 @@ def _build_agent():
             "X-Title": settings.OPENROUTER_X_TITLE,
         },
     )
+    # Без state_modifier — system prompt инжектится per-request в answer_question,
+    # потому что включает динамический список документов текущего notebook'а
+    # (нужен для мета-вопросов и для подбора поисковых формулировок).
     return create_react_agent(
         model=llm,
         tools=[search_documents],
-        state_modifier=SYSTEM_PROMPT,
     )
 
 
@@ -248,7 +250,29 @@ def answer_question(
     _reset_thread_state(user_id, notebook_id)
     agent = get_agent()
 
-    messages = _to_lc_messages(history) + [HumanMessage(content=question)]
+    # Динамический system prompt: правила + актуальный список документов
+    # текущего ноутбука. На мета-вопросах ("какие документы загружены") агент
+    # отвечает по этому списку без вызова search_documents. На контентных —
+    # имена файлов помогают подобрать осмысленные query.
+    docs_for_prompt: list[dict[str, Any]] = []
+    try:
+        docs = db.list_documents(owner_user_id=user_id, notebook_id=notebook_id)
+        for d in docs:
+            if d.status == "ready":
+                docs_for_prompt.append({
+                    "filename": d.filename,
+                    "chunk_count": d.chunk_count,
+                    "file_type": d.file_type,
+                })
+    except Exception as e:
+        log.warning("Не удалось получить список документов для prompt: %s", e)
+    system_prompt = build_system_prompt(docs_for_prompt)
+
+    messages = (
+        [SystemMessage(content=system_prompt)]
+        + _to_lc_messages(history)
+        + [HumanMessage(content=question)]
+    )
 
     # recursion_limit считает узлы графа: каждый цикл «model → tools → model»
     # это 2 узла. Плюс начальный шаг model. Формула: 1 + N×2 + запас.

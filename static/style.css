@@ -1028,6 +1028,101 @@ body.role-user #welcomeUploadBtn2 { display: none !important; }
     transform: translateX(100%);
     pointer-events: none;
 }
+/* Drag-handle на левой границе панели — двигаем мышью, изменяем ширину.
+   Узкая интерактивная зона + visual indicator при hover/active. */
+.source-resizer {
+    position: absolute;
+    left: -3px;
+    top: 0;
+    bottom: 0;
+    width: 6px;
+    cursor: col-resize;
+    z-index: 5;
+    background: transparent;
+    transition: background 0.15s;
+}
+.source-resizer:hover,
+.source-resizer.active {
+    background: var(--accent);
+    opacity: 0.6;
+}
+body.resizing-source {
+    user-select: none;
+    cursor: col-resize;
+}
+body.resizing-source iframe {
+    /* Иначе drag-events перехватываются iframe'ом и движение «застревает». */
+    pointer-events: none;
+}
+
+/* HTML-вьюер для DOCX/MD/TXT — статья с serif-шрифтом и нормальной типографикой.
+   Прокручиваемая область, не вылазит за границы панели. */
+.source-html-viewer {
+    position: absolute;
+    inset: 0;
+    overflow: auto;
+    padding: 32px 40px;
+    background: #ffffff;
+    color: #1a1a1a;
+    font-family: Georgia, "Times New Roman", serif;
+    font-size: 15px;
+    line-height: 1.65;
+}
+.source-html-viewer h1, .source-html-viewer h2, .source-html-viewer h3,
+.source-html-viewer h4, .source-html-viewer h5, .source-html-viewer h6 {
+    font-family: var(--font-sans, system-ui, sans-serif);
+    color: #111;
+    margin: 1.4em 0 0.5em;
+    line-height: 1.25;
+}
+.source-html-viewer h1 { font-size: 1.7em; border-bottom: 1px solid #ddd; padding-bottom: 0.3em; }
+.source-html-viewer h2 { font-size: 1.4em; }
+.source-html-viewer h3 { font-size: 1.2em; }
+.source-html-viewer p { margin: 0.8em 0; }
+.source-html-viewer ul, .source-html-viewer ol { margin: 0.8em 0; padding-left: 1.6em; }
+.source-html-viewer li { margin: 0.25em 0; }
+.source-html-viewer table {
+    border-collapse: collapse;
+    margin: 1em 0;
+    font-size: 13.5px;
+    max-width: 100%;
+}
+.source-html-viewer th, .source-html-viewer td {
+    border: 1px solid #ccc;
+    padding: 6px 10px;
+    text-align: left;
+    vertical-align: top;
+}
+.source-html-viewer th { background: #f4f4f4; font-weight: 600; }
+.source-html-viewer pre {
+    background: #f6f6f6;
+    border: 1px solid #e3e3e3;
+    border-radius: 4px;
+    padding: 12px 14px;
+    overflow-x: auto;
+    font-size: 13px;
+    line-height: 1.5;
+    font-family: var(--font-mono, ui-monospace, monospace);
+    white-space: pre-wrap;
+    word-wrap: break-word;
+}
+.source-html-viewer code {
+    background: #f1f1f1;
+    padding: 1px 5px;
+    border-radius: 3px;
+    font-family: var(--font-mono, ui-monospace, monospace);
+    font-size: 0.92em;
+}
+.source-html-viewer pre code { background: transparent; padding: 0; }
+.source-html-viewer blockquote {
+    border-left: 3px solid #d0d0d0;
+    padding: 4px 14px;
+    margin: 1em 0;
+    color: #555;
+    background: #fafafa;
+}
+.source-html-viewer img { max-width: 100%; height: auto; }
+.source-html-viewer a { color: #0a66c2; text-decoration: underline; }
 .source-header {
     padding: 14px 16px;
     border-bottom: 1px solid var(--border);
