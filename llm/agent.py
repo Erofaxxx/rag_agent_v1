@@ -24,6 +24,7 @@ def _reset_thread_state(user_id: Optional[int], notebook_id: Optional[int] = Non
     _thread_local.hits = []
     _thread_local.user_id = user_id
     _thread_local.notebook_id = notebook_id
+    _thread_local.tool_calls = 0
 
 
 def _get_hits() -> list[SearchHit]:
@@ -81,7 +82,23 @@ def search_documents(query: str) -> str:
     Args:
         query: поисковый запрос на естественном языке (русский или английский).
     """
-    log.info("[tool] search_documents(%r)", query)
+    # Hard cap на количество tool-вызовов за один turn — защита от runaway-итераций.
+    # Соответствует паттерну BudgetMiddleware из magnetto_agent_v2: вместо того
+    # чтобы упасть с recursion_limit, мягко отдаём LLM «лимит исчерпан, отвечай
+    # на основе того, что есть» и оставляем шанс сформировать финальный ответ.
+    used = getattr(_thread_local, "tool_calls", 0) + 1
+    _thread_local.tool_calls = used
+    cap = settings.MAX_TOOL_CALLS_PER_QUESTION
+
+    log.info("[tool] search_documents(%r) — call %d/%d", query, used, cap)
+
+    if used > cap:
+        return (
+            f"Лимит поисковых запросов исчерпан ({cap}). Дай финальный ответ "
+            f"на основе уже найденных фрагментов или скажи, что данных в "
+            f"документах недостаточно. НЕ вызывай search_documents снова."
+        )
+
     user_id = _get_user_id()
     notebook_id = _get_notebook_id()
     hits = search_service.search(
@@ -91,7 +108,16 @@ def search_documents(query: str) -> str:
         notebook_id=notebook_id,
     )
     _add_hits(hits)
-    return _format_hits_for_llm(hits)
+
+    formatted = _format_hits_for_llm(hits)
+    # Soft warning при приближении к лимиту — даёт LLM шанс заранее группировать
+    # запросы или решить, что найденного достаточно.
+    remaining = cap - used
+    if remaining == 0:
+        formatted += "\n\n[Это был последний доступный поиск. Сейчас формируй финальный ответ.]"
+    elif remaining == 1:
+        formatted += "\n\n[Остался ещё 1 поиск. Используй его только если ответ ещё неполный.]"
+    return formatted
 
 
 # --- ленивая инициализация LLM и агента (чтобы импорт модуля был дешёвым) ---
@@ -126,6 +152,48 @@ def get_agent():
             if _agent is None:
                 _agent = _build_agent()
     return _agent
+
+
+def _log_usage(messages: list) -> None:
+    """Логирует token usage всех AIMessage в ответе. Для DeepSeek через
+    OpenRouter в `prompt_tokens_details.cached_tokens` приходит количество
+    кэш-хитов (implicit caching). Видеть это полезно: если в одном диалоге
+    cached_tokens=0 раз за разом — значит префикс плывёт (вставляются
+    динамические данные, меняется порядок tools и т.п.) и кэш не работает."""
+    total_prompt = 0
+    total_completion = 0
+    total_cached = 0
+    calls = 0
+    for msg in messages:
+        if not isinstance(msg, AIMessage):
+            continue
+        meta = getattr(msg, "response_metadata", None) or {}
+        usage = meta.get("token_usage") or meta.get("usage") or {}
+        if not usage:
+            # langchain-openai иногда кладёт в .usage_metadata
+            um = getattr(msg, "usage_metadata", None) or {}
+            if um:
+                usage = {
+                    "prompt_tokens": um.get("input_tokens", 0),
+                    "completion_tokens": um.get("output_tokens", 0),
+                    "prompt_tokens_details": {
+                        "cached_tokens": (um.get("input_token_details") or {}).get("cache_read", 0),
+                    },
+                }
+        if not usage:
+            continue
+        calls += 1
+        total_prompt += int(usage.get("prompt_tokens") or 0)
+        total_completion += int(usage.get("completion_tokens") or 0)
+        details = usage.get("prompt_tokens_details") or {}
+        total_cached += int(details.get("cached_tokens") or 0)
+
+    if calls:
+        cache_pct = (100.0 * total_cached / total_prompt) if total_prompt else 0
+        log.info(
+            "LLM usage: %d calls, prompt=%d, completion=%d, cached=%d (%.0f%% hit)",
+            calls, total_prompt, total_completion, total_cached, cache_pct,
+        )
 
 
 def _truncate_history(history: list[dict[str, str]], limit: int) -> list[dict[str, str]]:
@@ -173,10 +241,14 @@ def answer_question(
 
     messages = _to_lc_messages(history) + [HumanMessage(content=question)]
 
+    # recursion_limit считает узлы графа: каждый цикл «model → tools → model»
+    # это 2 узла. Плюс начальный шаг model. Формула: 1 + N×2 + запас.
+    recursion_limit = 1 + settings.MAX_TOOL_CALLS_PER_QUESTION * 2 + 3
+
     try:
         result = agent.invoke(
             {"messages": messages},
-            config={"recursion_limit": 8},
+            config={"recursion_limit": recursion_limit},
         )
     except Exception as e:
         log.exception("Ошибка при вызове агента: %s", e)
@@ -184,6 +256,12 @@ def answer_question(
             "answer": f"Ошибка при обращении к LLM: {e}",
             "cited_chunks": [],
         }
+
+    # Логируем usage для мониторинга prompt cache hit-rate. У DeepSeek через
+    # OpenRouter кэш implicit — никаких маркеров не шлём, но при стабильном
+    # префиксе (system+tools+история) cached_tokens должны быть > 0 на 2-м
+    # и далее запросе в одном диалоге.
+    _log_usage(result["messages"])
 
     # Финальный ответ — последнее AIMessage без tool_calls
     answer = ""

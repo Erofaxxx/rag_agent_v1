@@ -1,9 +1,10 @@
+import json
 import logging
 import re
 import shutil
 import time
 from pathlib import Path
-from typing import Optional
+from typing import Any, Optional
 
 from fastapi import APIRouter, BackgroundTasks, Depends, File, Form, HTTPException, UploadFile, status
 from fastapi.responses import FileResponse
@@ -106,6 +107,20 @@ def _process_document(document_id: int) -> None:
             time.time() - started,
             len(chunks),
         )
+
+        # Для PDF — рядом с оригиналом сохраняем spans.json для подсветки
+        # цитат в боковом viewer'е. Сами цитаты живут в SQLite (chunks.text),
+        # этот файл — только для frontend overlay по bbox координатам.
+        if doc.file_type == "pdf":
+            try:
+                from parsers.pdf_parser import extract_pdf_spans
+                spans_data = extract_pdf_spans(doc.file_path)
+                spans_path = Path(doc.file_path).parent / "spans.json"
+                with open(spans_path, "w", encoding="utf-8") as f:
+                    json.dump(spans_data, f, ensure_ascii=False)
+                log.debug("PDF spans для %s: %d страниц", document_id, len(spans_data))
+            except Exception as e:
+                log.warning("Не удалось извлечь PDF spans для %s: %s", document_id, e)
         # Оригинал по умолчанию остаётся — нужен для перепарсинга при будущих
         # апгрейдах парсера, для скачивания пользователем, для compliance.
         # Удалить можно через KEEP_ORIGINAL_FILES=false в .env (если очень мало
@@ -158,6 +173,35 @@ def get_document_status(document_id: int, user: UserRow = Depends(require_user))
     if not doc or not _can_access(doc, user):
         raise HTTPException(404, "Документ не найден")
     return _to_out(doc)
+
+
+@router.get("/{document_id}/page/{page}/spans")
+def get_page_spans(
+    document_id: int,
+    page: int,
+    user: UserRow = Depends(require_user),
+) -> dict[str, Any]:
+    """Spans (текст + bbox в PDF user-space) для указанной страницы PDF.
+    Используется фронтом для подсветки фрагментов цитаты в pdf.js viewer'е."""
+    doc = db.get_document(document_id)
+    if not doc or not _can_access(doc, user):
+        raise HTTPException(404, "Документ не найден")
+    if doc.file_type != "pdf":
+        raise HTTPException(400, "Подсветка по bbox доступна только для PDF")
+    if not doc.file_path:
+        raise HTTPException(404, "Оригинал не сохранён")
+    spans_path = Path(doc.file_path).parent / "spans.json"
+    if not spans_path.exists():
+        raise HTTPException(404, "Spans не извлечены — попробуйте перезагрузить документ")
+    try:
+        with open(spans_path, "r", encoding="utf-8") as f:
+            data = json.load(f)
+    except Exception as e:
+        raise HTTPException(500, f"Не удалось прочитать spans: {e}")
+    page_data = data.get(str(page)) or data.get(page)
+    if not page_data:
+        raise HTTPException(404, f"Нет данных для страницы {page}")
+    return page_data
 
 
 @router.get("/{document_id}/file")

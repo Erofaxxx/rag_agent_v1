@@ -87,6 +87,11 @@ class Settings(BaseSettings):
     SEARCH_TOP_K: int = 7
     SEARCH_USE_BM25: bool = False
 
+    # Лимит инструментальных вызовов агента за один вопрос юзера. Hard cap —
+    # после исчерпания tool вернёт «лимит достигнут», и LLM должна отвечать
+    # уже без поиска. Защита от runaway-итераций.
+    MAX_TOOL_CALLS_PER_QUESTION: int = 5
+
     # Limits
     MAX_FILE_SIZE_MB: int = 50
     MAX_DOCUMENTS: int = 100

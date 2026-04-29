@@ -153,11 +153,12 @@ class SecurityHeadersMiddleware(BaseHTTPMiddleware):
         response.headers.setdefault(
             "Content-Security-Policy",
             "default-src 'self'; "
-            "script-src 'self' https://cdn.jsdelivr.net; "
+            "script-src 'self' https://cdn.jsdelivr.net 'wasm-unsafe-eval'; "
+            "worker-src 'self' blob:; "
             "style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; "
             "font-src 'self' https://fonts.gstatic.com data:; "
             "img-src 'self' data: blob:; "
-            "connect-src 'self'; "
+            "connect-src 'self' https://cdn.jsdelivr.net; "
             "frame-src 'self'; "
             "frame-ancestors 'self'; "
             "form-action 'self'; "

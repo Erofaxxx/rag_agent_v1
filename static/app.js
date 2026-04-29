@@ -321,8 +321,28 @@ function closeNotebookDropdown() {
 
 // ============== Source viewer ==============
 
+// State текущего PDF-просмотра
+const pdfState = {
+    documentId: null,
+    pdfDoc: null,           // pdfjsLib.PDFDocumentProxy
+    currentPage: 1,
+    totalPages: 1,
+    scale: 1.5,
+    snippet: "",            // текст цитаты для матчинга spans
+    pageSpansCache: {},     // { [page]: { width, height, spans } }
+};
+
+async function ensurePdfJsWorker() {
+    if (!window.pdfjsLib) {
+        throw new Error("pdf.js не загрузился (проверьте CSP/CDN)");
+    }
+    if (!window.pdfjsLib.GlobalWorkerOptions.workerSrc) {
+        window.pdfjsLib.GlobalWorkerOptions.workerSrc =
+            "https://cdn.jsdelivr.net/npm/pdfjs-dist@3.11.174/build/pdf.worker.min.js";
+    }
+}
+
 function showSource(chunk) {
-    // Закрываем модалку, если была
     els.modal.classList.add("hidden");
 
     const loc = [
@@ -335,6 +355,7 @@ function showSource(chunk) {
     document.getElementById("sourceLocation").textContent = loc || "";
     document.getElementById("sourceSnippet").textContent = chunk.snippet || "";
 
+    const pdfViewer = document.getElementById("pdfViewer");
     const iframe = document.getElementById("sourceIframe");
     const fallback = document.getElementById("sourceFallback");
     const downloadLink = document.getElementById("sourceDownloadLink");
@@ -345,22 +366,187 @@ function showSource(chunk) {
     downloadLink.href = fileUrl;
     document.getElementById("sourceOpenInNewTab").onclick = () => window.open(fileUrl, "_blank");
 
+    document.getElementById("sourcePanel").classList.remove("hidden");
+
     if (ext === "pdf") {
-        // Открываем PDF в iframe на нужной странице. Native viewers Chrome/
-        // Firefox/Safari распознают #page=N. Это простое решение без bundling pdf.js.
-        const page = chunk.page_number ? `#page=${chunk.page_number}` : "";
-        iframe.style.display = "block";
+        pdfViewer.hidden = false;
+        iframe.hidden = true;
         fallback.hidden = true;
-        iframe.src = fileUrl + page;
+        openPdfWithHighlight(chunk).catch(err => {
+            console.error("PDF open error:", err);
+            // На случай если pdf.js не загрузился — fallback на iframe
+            pdfViewer.hidden = true;
+            iframe.hidden = false;
+            const page = chunk.page_number ? `#page=${chunk.page_number}` : "";
+            iframe.src = fileUrl + page;
+        });
     } else {
-        iframe.style.display = "none";
+        pdfViewer.hidden = true;
+        iframe.hidden = true;
         iframe.src = "about:blank";
         fallback.hidden = false;
         const formatLabel = ext ? ext.toUpperCase() : "этот формат";
         fallbackText.textContent = `Встроенный просмотр для ${formatLabel} недоступен — скачайте оригинал, чтобы увидеть полный документ.`;
     }
+}
 
-    document.getElementById("sourcePanel").classList.remove("hidden");
+async function openPdfWithHighlight(chunk) {
+    await ensurePdfJsWorker();
+
+    // Если уже открыт этот же документ — переиспользуем
+    if (pdfState.documentId !== chunk.document_id || !pdfState.pdfDoc) {
+        // Очистка предыдущего
+        if (pdfState.pdfDoc) {
+            try { pdfState.pdfDoc.destroy(); } catch (_) {}
+        }
+        pdfState.pageSpansCache = {};
+        pdfState.documentId = chunk.document_id;
+
+        const url = `/api/documents/${chunk.document_id}/file`;
+        const loadingTask = window.pdfjsLib.getDocument({
+            url,
+            withCredentials: true,  // куки сессии для API
+        });
+        pdfState.pdfDoc = await loadingTask.promise;
+        pdfState.totalPages = pdfState.pdfDoc.numPages;
+    }
+
+    pdfState.snippet = chunk.snippet || "";
+    pdfState.currentPage = Math.max(1, Math.min(chunk.page_number || 1, pdfState.totalPages));
+
+    await renderPdfPage();
+}
+
+async function renderPdfPage() {
+    if (!pdfState.pdfDoc) return;
+
+    const page = await pdfState.pdfDoc.getPage(pdfState.currentPage);
+    const viewport = page.getViewport({ scale: pdfState.scale });
+
+    const canvas = document.getElementById("pdfCanvas");
+    const ctx = canvas.getContext("2d");
+    const overlay = document.getElementById("pdfOverlay");
+    const container = document.getElementById("pdfPageContainer");
+
+    canvas.width = viewport.width;
+    canvas.height = viewport.height;
+    container.style.width = viewport.width + "px";
+    container.style.height = viewport.height + "px";
+
+    overlay.innerHTML = "";
+
+    await page.render({ canvasContext: ctx, viewport }).promise;
+
+    document.getElementById("pdfPageInfo").textContent =
+        `${pdfState.currentPage} / ${pdfState.totalPages}`;
+    document.getElementById("pdfZoomInfo").textContent =
+        `${Math.round(pdfState.scale * 100 / 1.5)}%`;
+    document.getElementById("pdfPrevPage").disabled = pdfState.currentPage <= 1;
+    document.getElementById("pdfNextPage").disabled = pdfState.currentPage >= pdfState.totalPages;
+
+    await renderHighlightsForCurrentPage(viewport);
+}
+
+async function renderHighlightsForCurrentPage(viewport) {
+    if (!pdfState.snippet) return;
+
+    let pageData = pdfState.pageSpansCache[pdfState.currentPage];
+    if (!pageData) {
+        try {
+            pageData = await api(`/documents/${pdfState.documentId}/page/${pdfState.currentPage}/spans`);
+            pdfState.pageSpansCache[pdfState.currentPage] = pageData;
+        } catch (e) {
+            console.warn("Spans недоступны для подсветки:", e.message);
+            return;
+        }
+    }
+    if (!pageData || !pageData.spans) return;
+
+    const matchedSpans = matchSpans(pdfState.snippet, pageData.spans);
+    if (!matchedSpans.length) return;
+
+    const overlay = document.getElementById("pdfOverlay");
+    let firstHighlight = null;
+
+    for (const span of matchedSpans) {
+        const [vx0, vy0, vx1, vy1] = viewport.convertToViewportRectangle(span.b);
+        const left = Math.min(vx0, vx1);
+        const top = Math.min(vy0, vy1);
+        const width = Math.abs(vx1 - vx0);
+        const height = Math.abs(vy1 - vy0);
+        if (width < 1 || height < 1) continue;
+        const box = document.createElement("div");
+        box.className = "pdf-highlight";
+        box.style.cssText = `left:${left}px; top:${top}px; width:${width}px; height:${height}px;`;
+        overlay.appendChild(box);
+        if (!firstHighlight) firstHighlight = box;
+    }
+
+    // Скроллим к первому подсвеченному месту
+    if (firstHighlight) {
+        firstHighlight.scrollIntoView({ behavior: "smooth", block: "center" });
+    }
+}
+
+// Матчер: ищем спаны, чей текст значимо пересекается с цитатой.
+// Backend chunker рвёт текст по пробелам и предложениям, точного совпадения
+// span-к-чанку не будет — поэтому идём по пересечению окон в 8+ символов.
+function matchSpans(snippet, spans) {
+    const norm = s => s.toLowerCase().replace(/\s+/g, " ").trim();
+    const sn = norm(snippet);
+    if (!sn || sn.length < 8) return [];
+
+    const matched = [];
+    for (const span of spans) {
+        const t = norm(span.t || "");
+        if (!t || t.length < 3) continue;
+        // Если span короткий (например, цифра «3») — требуем хотя бы 6 символов
+        // чтобы избежать ложных матчей. Длинный span — подсветим, если есть в цитате.
+        if (t.length < 6) {
+            // короткие отдельные «слова» матчим только если граничат словами
+            const re = new RegExp(`(^|\\W)${escapeRegex(t)}(\\W|$)`);
+            if (re.test(sn)) matched.push(span);
+        } else {
+            if (sn.includes(t)) matched.push(span);
+            else {
+                // Частичное вхождение — окна по 12 символов
+                const win = 12;
+                let hit = false;
+                for (let i = 0; i + win <= t.length && !hit; i += 4) {
+                    if (sn.includes(t.substring(i, i + win))) hit = true;
+                }
+                if (hit) matched.push(span);
+            }
+        }
+    }
+    return matched;
+}
+
+function escapeRegex(s) {
+    return s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
+function bindPdfControls() {
+    document.getElementById("pdfPrevPage").addEventListener("click", async () => {
+        if (pdfState.currentPage > 1) {
+            pdfState.currentPage--;
+            await renderPdfPage();
+        }
+    });
+    document.getElementById("pdfNextPage").addEventListener("click", async () => {
+        if (pdfState.currentPage < pdfState.totalPages) {
+            pdfState.currentPage++;
+            await renderPdfPage();
+        }
+    });
+    document.getElementById("pdfZoomIn").addEventListener("click", async () => {
+        pdfState.scale = Math.min(3, pdfState.scale + 0.25);
+        await renderPdfPage();
+    });
+    document.getElementById("pdfZoomOut").addEventListener("click", async () => {
+        pdfState.scale = Math.max(0.5, pdfState.scale - 0.25);
+        await renderPdfPage();
+    });
 }
 
 function closeSourcePanel() {
@@ -369,6 +555,15 @@ function closeSourcePanel() {
     panel.classList.add("hidden");
     const iframe = document.getElementById("sourceIframe");
     if (iframe) iframe.src = "about:blank";  // освобождаем память от PDF
+    // pdf.js: уничтожаем документ чтобы не утекал worker и память canvas
+    if (pdfState.pdfDoc) {
+        try { pdfState.pdfDoc.destroy(); } catch (_) {}
+        pdfState.pdfDoc = null;
+        pdfState.documentId = null;
+        pdfState.pageSpansCache = {};
+    }
+    const overlay = document.getElementById("pdfOverlay");
+    if (overlay) overlay.innerHTML = "";
 }
 
 function renderConversations() {
@@ -849,6 +1044,7 @@ function bindEvents() {
             if (panel && !panel.classList.contains("hidden")) closeSourcePanel();
         }
     });
+    bindPdfControls();
 
     els.renameChatBtn.addEventListener("click", async () => {
         if (!state.conversationId) return;
