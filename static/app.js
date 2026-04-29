@@ -364,6 +364,7 @@ function showSource(chunk) {
     document.getElementById("sourceSnippet").textContent = chunk.snippet || "";
 
     const pdfViewer = document.getElementById("pdfViewer");
+    const htmlViewer = document.getElementById("sourceHtmlViewer");
     const iframe = document.getElementById("sourceIframe");
     const fallback = document.getElementById("sourceFallback");
     const downloadLink = document.getElementById("sourceDownloadLink");
@@ -376,25 +377,90 @@ function showSource(chunk) {
 
     document.getElementById("sourcePanel").classList.remove("hidden");
 
+    // Сбрасываем все вьюеры
+    pdfViewer.hidden = true;
+    htmlViewer.hidden = true;
+    htmlViewer.innerHTML = "";
+    iframe.hidden = true;
+    iframe.src = "about:blank";
+    fallback.hidden = true;
+
     if (ext === "pdf") {
         pdfViewer.hidden = false;
-        iframe.hidden = true;
-        fallback.hidden = true;
         openPdfWithHighlight(chunk).catch(err => {
             console.error("PDF open error:", err);
-            // На случай если pdf.js не загрузился — fallback на iframe
             pdfViewer.hidden = true;
             iframe.hidden = false;
             const page = chunk.page_number ? `#page=${chunk.page_number}` : "";
             iframe.src = fileUrl + page;
         });
+    } else if (["docx", "doc", "md", "markdown", "txt", "csv"].includes(ext)) {
+        // Подгружаем готовый HTML/markdown/text с бэкенда и рендерим инлайн —
+        // чтобы Word и markdown показывались с типографикой, а не как сырой
+        // текст или «скачать файл».
+        htmlViewer.hidden = false;
+        htmlViewer.innerHTML = '<div class="pdf-loading">Загрузка…</div>';
+        renderHtmlSource(chunk, ext, fileUrl).catch(err => {
+            console.error("HTML viewer error:", err);
+            htmlViewer.hidden = true;
+            fallback.hidden = false;
+            fallbackText.textContent = `Не удалось открыть просмотр (${err.message}). Скачайте оригинал.`;
+        });
     } else {
-        pdfViewer.hidden = true;
-        iframe.hidden = true;
-        iframe.src = "about:blank";
+        // Неподдерживаемый формат — оставляем кнопку «скачать»
         fallback.hidden = false;
         const formatLabel = ext ? ext.toUpperCase() : "этот формат";
         fallbackText.textContent = `Встроенный просмотр для ${formatLabel} недоступен — скачайте оригинал, чтобы увидеть полный документ.`;
+    }
+}
+
+async function renderHtmlSource(chunk, ext, fileUrl) {
+    const data = await api(`/documents/${chunk.document_id}/html`);
+    const viewer = document.getElementById("sourceHtmlViewer");
+    let html = "";
+    if (data.format === "html") {
+        // mammoth-вывод: разрешаем форматирующие теги, чистим скрипты/стили.
+        html = window.DOMPurify
+            ? window.DOMPurify.sanitize(data.content, { USE_PROFILES: { html: true } })
+            : data.content;
+    } else if (data.format === "markdown") {
+        const md = window.marked ? window.marked.parse(data.content) : escapeHtml(data.content);
+        html = window.DOMPurify
+            ? window.DOMPurify.sanitize(md, { USE_PROFILES: { html: true } })
+            : md;
+    } else {
+        // text / csv → plain text внутри pre, без HTML-парсинга
+        html = `<pre>${escapeHtml(data.content)}</pre>`;
+    }
+    viewer.innerHTML = html;
+    // Скролл к первому совпадению со snippet'ом (best-effort через выделение).
+    if (chunk.snippet) {
+        const norm = s => (s || "").toLowerCase().replace(/\s+/g, " ").trim();
+        const sn = norm(chunk.snippet).slice(0, 80);
+        if (sn.length > 12) {
+            const walker = document.createTreeWalker(viewer, NodeFilter.SHOW_TEXT);
+            let node;
+            while ((node = walker.nextNode())) {
+                if (norm(node.textContent).includes(sn.slice(0, 24))) {
+                    const range = document.createRange();
+                    range.selectNodeContents(node);
+                    const rect = range.getBoundingClientRect();
+                    const vRect = viewer.getBoundingClientRect();
+                    viewer.scrollTop += rect.top - vRect.top - 80;
+                    // Кратковременно подсвечиваем абзац
+                    const parent = node.parentElement;
+                    if (parent) {
+                        const orig = parent.style.backgroundColor;
+                        parent.style.backgroundColor = "rgba(255, 213, 79, 0.45)";
+                        parent.style.transition = "background-color 1.5s";
+                        setTimeout(() => {
+                            parent.style.backgroundColor = orig;
+                        }, 2500);
+                    }
+                    break;
+                }
+            }
+        }
     }
 }
 
@@ -642,6 +708,8 @@ function closeSourcePanel() {
     panel.classList.add("hidden");
     const iframe = document.getElementById("sourceIframe");
     if (iframe) iframe.src = "about:blank";  // освобождаем память от PDF
+    const htmlViewer = document.getElementById("sourceHtmlViewer");
+    if (htmlViewer) htmlViewer.innerHTML = "";
     // pdf.js: уничтожаем документ чтобы не утекал worker и память canvas
     if (pdfState.pdfDoc) {
         try { pdfState.pdfDoc.destroy(); } catch (_) {}
@@ -651,6 +719,66 @@ function closeSourcePanel() {
     }
     const overlay = document.getElementById("pdfOverlay");
     if (overlay) overlay.innerHTML = "";
+}
+
+// Drag-resize боковой панели. Хранит ширину в localStorage чтобы при следующем
+// открытии сохранялась.
+const SOURCE_WIDTH_KEY = "rag.sourcePanelWidth";
+
+function applySavedSourceWidth() {
+    try {
+        const saved = parseInt(localStorage.getItem(SOURCE_WIDTH_KEY) || "0", 10);
+        if (saved > 320 && saved < window.innerWidth - 200) {
+            const panel = document.getElementById("sourcePanel");
+            if (panel) panel.style.width = saved + "px";
+        }
+    } catch (_) {}
+}
+
+function bindSourceResize() {
+    const handle = document.getElementById("sourceResizer");
+    const panel = document.getElementById("sourcePanel");
+    if (!handle || !panel) return;
+
+    let startX = 0;
+    let startWidth = 0;
+    let dragging = false;
+
+    const onMove = (e) => {
+        if (!dragging) return;
+        const dx = startX - e.clientX;
+        // Расширяем при перетаскивании влево, сжимаем при перетаскивании вправо.
+        const next = Math.max(320, Math.min(window.innerWidth - 200, startWidth + dx));
+        panel.style.width = next + "px";
+        // Если открыт PDF — он подхватит новую ширину при следующем зуме/перерисовке.
+        // Чтобы пользователь сразу увидел fit-to-width на новой ширине, можно
+        // при необходимости вызвать fitPdfToWidth, но это дёргает render —
+        // сделаем по отпусканию.
+    };
+    const onUp = () => {
+        if (!dragging) return;
+        dragging = false;
+        document.body.classList.remove("resizing-source");
+        handle.classList.remove("active");
+        document.removeEventListener("mousemove", onMove);
+        document.removeEventListener("mouseup", onUp);
+        try { localStorage.setItem(SOURCE_WIDTH_KEY, String(panel.offsetWidth)); } catch (_) {}
+    };
+    handle.addEventListener("mousedown", (e) => {
+        e.preventDefault();
+        dragging = true;
+        startX = e.clientX;
+        startWidth = panel.offsetWidth;
+        document.body.classList.add("resizing-source");
+        handle.classList.add("active");
+        document.addEventListener("mousemove", onMove);
+        document.addEventListener("mouseup", onUp);
+    });
+    // Двойной клик — сброс к дефолту
+    handle.addEventListener("dblclick", () => {
+        panel.style.width = "";
+        try { localStorage.removeItem(SOURCE_WIDTH_KEY); } catch (_) {}
+    });
 }
 
 function renderConversations() {
@@ -1150,6 +1278,8 @@ function bindEvents() {
         }
     });
     bindPdfControls();
+    bindSourceResize();
+    applySavedSourceWidth();
 
     els.renameChatBtn.addEventListener("click", async () => {
         if (!state.conversationId) return;
