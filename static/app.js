@@ -469,34 +469,69 @@ async function renderHtmlSource(chunk, ext, fileUrl) {
         throw new Error(`empty render (format=${data.format}, content len=${(data.content || "").length})`);
     }
     viewer.innerHTML = html;
-    // Скролл к первому совпадению со snippet'ом (best-effort через выделение).
-    if (chunk.snippet) {
-        const norm = s => (s || "").toLowerCase().replace(/\s+/g, " ").trim();
-        const sn = norm(chunk.snippet).slice(0, 80);
-        if (sn.length > 12) {
-            const walker = document.createTreeWalker(viewer, NodeFilter.SHOW_TEXT);
-            let node;
-            while ((node = walker.nextNode())) {
-                if (norm(node.textContent).includes(sn.slice(0, 24))) {
-                    const range = document.createRange();
-                    range.selectNodeContents(node);
-                    const rect = range.getBoundingClientRect();
-                    const vRect = viewer.getBoundingClientRect();
-                    viewer.scrollTop += rect.top - vRect.top - 80;
-                    // Кратковременно подсвечиваем абзац
-                    const parent = node.parentElement;
-                    if (parent) {
-                        const orig = parent.style.backgroundColor;
-                        parent.style.backgroundColor = "rgba(255, 213, 79, 0.45)";
-                        parent.style.transition = "background-color 1.5s";
-                        setTimeout(() => {
-                            parent.style.backgroundColor = orig;
-                        }, 2500);
-                    }
-                    break;
-                }
-            }
+    highlightSnippetInViewer(viewer, chunk.snippet || "");
+}
+
+// Точечная подсветка цитаты: оборачиваем найденный диапазон в <mark> вместо
+// заливки всего <p>. Раньше пользователь видел "сверху написано одно,
+// выделено другое" — потому что snippet был лишь куском абзаца, а заливался
+// весь абзац целиком.
+function highlightSnippetInViewer(viewer, rawSnippet) {
+    if (!rawSnippet) return;
+    let snippet = rawSnippet.replace(/\s+/g, " ").trim();
+    // Чанкер часто режет на полуслове — сдвигаемся к ближайшим word-границам,
+    // чтобы поиск был стабильным.
+    const firstSp = snippet.indexOf(" ");
+    if (firstSp > 0 && firstSp < 24) snippet = snippet.slice(firstSp + 1);
+    const lastSp = snippet.lastIndexOf(" ");
+    if (lastSp > snippet.length - 24 && lastSp > 0) snippet = snippet.slice(0, lastSp);
+    if (snippet.length < 12) return;
+
+    // Ищем самый длинный префикс snippet'а, который целиком умещается в одном
+    // текстовом узле. Этого хватает: mammoth-выхлоп даёт длинные текстовые
+    // узлы внутри <p>/<li>.
+    const walker = document.createTreeWalker(viewer, NodeFilter.SHOW_TEXT);
+    let bestNode = null, bestIdx = -1, bestLen = 0;
+    let n;
+    while ((n = walker.nextNode())) {
+        const t = (n.nodeValue || "").replace(/\s+/g, " ");
+        if (t.length < 12) continue;
+        let lo = 12, hi = Math.min(snippet.length, t.length);
+        let fLen = 0, fIdx = -1;
+        while (lo <= hi) {
+            const mid = (lo + hi) >> 1;
+            const idx = t.indexOf(snippet.slice(0, mid));
+            if (idx >= 0) { fLen = mid; fIdx = idx; lo = mid + 1; }
+            else hi = mid - 1;
         }
+        if (fLen > bestLen) {
+            bestNode = n; bestIdx = fIdx; bestLen = fLen;
+            if (fLen >= snippet.length) break;
+        }
+    }
+    if (!bestNode || bestLen < 12) return;
+
+    // Найденный индекс — в normalised строке. В реальном nodeValue пробелы
+    // могли быть множественные, поэтому ищем по первому слову совпадения.
+    const real = bestNode.nodeValue || "";
+    const firstWord = snippet.slice(0, Math.min(bestLen, 40)).split(" ")[0];
+    let startIdx = real.indexOf(firstWord);
+    if (startIdx < 0) startIdx = bestIdx;
+    const endIdx = Math.min(real.length, startIdx + bestLen);
+
+    const range = document.createRange();
+    try {
+        range.setStart(bestNode, startIdx);
+        range.setEnd(bestNode, endIdx);
+        const mark = document.createElement("mark");
+        mark.className = "snippet-mark";
+        range.surroundContents(mark);
+        const mr = mark.getBoundingClientRect();
+        const vr = viewer.getBoundingClientRect();
+        viewer.scrollTop += mr.top - vr.top - 80;
+    } catch (_) {
+        // surroundContents бросает если диапазон пересекает границы тэгов —
+        // пропускаем подсветку, скролл не критичен.
     }
 }
 
