@@ -37,6 +37,11 @@ class ChatResponse(BaseModel):
     message_id: int
     answer: str
     cited_chunks: list[CitedChunk]
+    # Результат пост-сверки ответа: verified=False означает, что часть
+    # утверждений не подтверждена найденными фрагментами (предупреждение
+    # уже встроено в текст answer). Фронт может нарисовать badge.
+    verified: bool = True
+    unsupported: list[str] = []
 
 
 async def _do_llm_work(
@@ -46,21 +51,23 @@ async def _do_llm_work(
     history: list[dict[str, str]],
     user_id: int,
     notebook_id: Optional[int],
-) -> tuple[int, str, list[dict[str, Any]]]:
+) -> tuple[int, str, list[dict[str, Any]], dict[str, Any]]:
     """Зашильженная LLM-работа: считает ответ и СОХРАНЯЕТ его в БД даже если
-    клиент дисконнектнулся. Возвращает (message_id, answer, cited_chunks)."""
+    клиент дисконнектнулся. Возвращает (message_id, answer, cited_chunks, verification)."""
+    verification: dict[str, Any] = {"verified": True, "unsupported": []}
     try:
         result: dict[str, Any] = await run_in_threadpool(
             answer_question, user_message, history, user_id, notebook_id
         )
         answer = result.get("answer") or "Не удалось получить ответ от модели."
         cited = result.get("cited_chunks") or []
+        verification = result.get("verification") or verification
     except Exception as e:
         log.exception("Ошибка генерации ответа: %s", e)
         answer = f"Ошибка при обращении к LLM: {e}"
         cited = []
     msg_id = db.add_message(conversation_id, "assistant", answer, cited_chunks=cited)
-    return msg_id, answer, cited
+    return msg_id, answer, cited, verification
 
 
 @router.post("", response_model=ChatResponse, dependencies=[Depends(csrf_check)])
@@ -112,7 +119,7 @@ async def chat(req: ChatRequest, user: UserRow = Depends(require_user)) -> ChatR
         notebook_id=notebook_id,
     )
     try:
-        msg_id, answer, cited = await asyncio.shield(work)
+        msg_id, answer, cited, verification = await asyncio.shield(work)
     except asyncio.CancelledError:
         # Клиент отрубился. shield()-задача всё равно доработает в фоне и
         # запишет результат в БД — нам только перевыбросить отмену.
@@ -127,4 +134,6 @@ async def chat(req: ChatRequest, user: UserRow = Depends(require_user)) -> ChatR
         message_id=msg_id,
         answer=answer,
         cited_chunks=[CitedChunk(**c) for c in cited],
+        verified=bool(verification.get("verified", True)),
+        unsupported=list(verification.get("unsupported") or []),
     )
