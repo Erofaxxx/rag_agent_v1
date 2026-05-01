@@ -87,7 +87,7 @@ def _process_document(document_id: int) -> None:
         if not segments:
             raise ValueError("Не удалось извлечь текст из документа")
 
-        chunks = chunk_segments(segments)
+        chunks = chunk_segments(segments, file_type=doc.file_type)
         if not chunks:
             raise ValueError("После чанкинга не осталось ни одного фрагмента")
 

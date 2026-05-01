@@ -252,17 +252,60 @@ curl -b jar.txt -H "X-Requested-With: fetch" -H "Content-Type: application/json"
 
 - **Агент, а не плоский RAG.** Используется `langgraph.prebuilt.create_react_agent`
   с одним инструментом `search_documents`. Агент сам решает, делать ли ещё один
-  поиск с переформулированным запросом, если первая выдача не отвечает на вопрос.
-  При этом контекст не пухнет: тул каждый раз возвращает только top-7 свежих
-  чанков, а не накапливает.
-- **Token-эффективность.** История диалога режется до 8 сообщений, в каждом
-  ответе — список процитированных чанков с короткими сниппетами. Полный текст
-  чанка не уезжает в LLM повторно — он лежит в SQLite.
+  поиск, если первая выдача не отвечает на вопрос. Контекст не пухнет: тул
+  каждый раз возвращает только top-K свежих чанков, не накапливает.
+- **Качество retrieval встроено внутрь tool, а не возложено на LLM.** Один
+  вызов `search_documents` под капотом включает (всё опционально, см. `.env`):
+  - **Multi-query** — LLM генерирует 2 альтернативные формулировки, выдачи
+    объединяются через RRF;
+  - **HyDE** — для определительных запросов («что такое X») LLM генерирует
+    гипотетический фрагмент-ответ, его эмбеддинг идёт в поиск вместе с запросом;
+  - **Hybrid dense + BM25** — RRF поверх FAISS и BM25 (BM25 всегда выручает
+    запросы по датам, кодам, именам);
+  - **Entity routing** — запросы из преимущественно дат/артикулов/кодов
+    автоматически идут BM25-only, без шумного семантического поиска;
+  - **Reformulate-on-low-score** — если средний score топа ниже порога, LLM
+    переформулирует с подсказкой из найденных терминов, и поиск повторяется;
+  - **Reranker** — top-N кандидатов реранкятся через основную LLM (DeepSeek)
+    либо через локальный cross-encoder (BGE reranker, опц.);
+  - **Adaptive top-K** — для перечислений / сравнений возвращается больше
+    фрагментов, для длинных конкретных — меньше.
+- **Адаптивный чанкинг.** Размер чанков подбирается под тип документа
+  (xlsx/csv → 1200, pptx → 1500, длинные PDF → 3000). Опционально доступен
+  семантический сплит: между параграфами считается cosine эмбеддингов и
+  граница ставится только там, где смысл реально меняется.
+- **Smart table extraction для PDF.** Таблицы извлекаются через `pdfplumber`
+  как отдельные сегменты в Markdown — строка не размывается между чанками.
+- **Пост-сверка ответа.** После генерации мы делаем дешёвый LLM-вызов и
+  сверяем утверждения с найденными фрагментами. Если что-то не подтверждено,
+  к ответу добавляется явное предупреждение со списком неподтверждённых
+  утверждений (никакой автоматической retry — слишком дорого, а явное
+  предупреждение даёт пользователю шанс перепроверить).
+- **Token-эффективность.** История режется до 8 сообщений, inline-цитаты
+  вычищаются из истории перед отправкой в LLM (иначе модель «рециркулирует»
+  свои же выдуманные ссылки). Полный текст чанка не уезжает в LLM повторно.
 - **FAISS Flat, а не HNSW.** На 30–40 документов — максимум ~5000 векторов.
   Точный поиск занимает миллисекунды, ничего сложнее не нужно.
-- **Один воркер uvicorn.** Модель эмбеддингов (~2 GB RAM) и FAISS-индекс не
-  имеет смысла дублировать; пользователь один. CPU-bound операции (эмбеддинг)
-  выполняются в `run_in_threadpool`, чтобы не блокировать event loop.
+- **Один воркер uvicorn.** Модель эмбеддингов и FAISS-индекс не имеет смысла
+  дублировать. CPU-bound операции выполняются в `run_in_threadpool`.
+
+### Стоимость доп. слоёв
+
+Все улучшения выше «платятся» дополнительными LLM-вызовами:
+
+| Слой | Стоимость на один вопрос | По умолчанию |
+|---|---|---|
+| Multi-query | +1 LLM вызов на каждый search | ON |
+| HyDE | +1 LLM + 1 embedding на definition-запрос | ON |
+| Reformulate-on-low | +1 LLM (только при низком score) | ON |
+| Reranker (provider=llm) | +1 LLM на каждый search | ON |
+| Reranker (provider=ce) | 0 (но +0.5 GB RAM на cross-encoder) | OFF |
+| Answer verification | +1 LLM на ответ | ON |
+
+На один вопрос пользователя с одним search'ом это в среднем 3–5 LLM-вызовов
+вместо 1 «классических». Для DeepSeek через OpenRouter это $0.005–0.02 за
+вопрос. Если нужно дешевле — выключите часть слоёв через `.env` (поиск
+останется работоспособным с любым подмножеством).
 
 ## Структура проекта
 
@@ -283,17 +326,22 @@ curl -b jar.txt -H "X-Requested-With: fetch" -H "Content-Type: application/json"
 │   ├── conversations.py
 │   └── admin.py             # /api/admin/users/* + /api/admin/audit
 ├── parsers/                 # один модуль на формат
-│   ├── pdf_parser.py        # PyMuPDF + OCR fallback
+│   ├── pdf_parser.py        # PyMuPDF + OCR fallback + pdfplumber для таблиц
 │   ├── docx_parser.py       # mammoth → markdown
 │   ├── xlsx_parser.py       # маленькие листы целиком, большие — построчно
 │   ├── pptx_parser.py
 │   └── router.py            # python-magic + расширение → нужный парсер
-├── chunking/chunker.py      # рекурсивный сплиттер по сепараторам
+├── chunking/chunker.py      # adaptive size + structural / semantic split
 ├── embeddings/bge_m3.py     # singleton, FlagEmbedding или sentence-transformers
-├── search/faiss_index.py    # FAISS + SearchService (opt. BM25)
+├── search/
+│   ├── faiss_index.py       # FAISS + hybrid SearchService (dense+BM25+RRF)
+│   ├── entity_detector.py   # daters/codes/intents → routing & adaptive top-K
+│   ├── query_expansion.py   # multi-query + HyDE + reformulate
+│   └── reranker.py          # LLM / cross-encoder реранкер top-N → top-K
 ├── llm/
 │   ├── prompts.py
-│   └── agent.py             # ReAct-агент с tool search_documents
+│   ├── agent.py             # ReAct-агент с tool search_documents
+│   └── verifier.py          # пост-сверка утверждений ответа с чанками
 ├── storage/database.py      # SQLite: documents, chunks, conversations, messages,
 │                            # users, sessions, auth_audit
 ├── static/                  # фронт без сборки

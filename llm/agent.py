@@ -10,6 +10,7 @@ from langgraph.prebuilt import create_react_agent
 
 from config import settings
 from llm.prompts import SYSTEM_PROMPT, build_system_prompt
+from llm.verifier import append_verification_warning, verify_answer
 from search import search_service, SearchHit
 from storage import db
 
@@ -110,9 +111,12 @@ def search_documents(query: str) -> str:
 
     user_id = _get_user_id()
     notebook_id = _get_notebook_id()
+    # k=None даёт SearchService использовать адаптивный top-k (если включён в
+    # настройках). Все остальные качество-улучшающие слои (multi-query, HyDE,
+    # BM25, реранк, reformulate-on-low) встроены в search_service.search.
     hits = search_service.search(
         query,
-        k=settings.SEARCH_TOP_K,
+        k=None,
         owner_user_id=user_id,
         notebook_id=notebook_id,
     )
@@ -335,7 +339,25 @@ def answer_question(
         for h in _get_hits()
     ]
 
-    return {"answer": answer, "cited_chunks": cited}
+    # Пост-сверка ответа с найденными фрагментами. Стоит +1 LLM-вызов на
+    # вопрос — выгодно: ловит галлюцинации, на которые сам агент не падает
+    # (например, придуманные цифры рядом с правильно процитированной страницей).
+    verification: dict[str, Any] = {"unsupported": [], "verified": True}
+    if settings.ANSWER_VERIFICATION and answer and cited:
+        try:
+            verification = verify_answer(question, answer, cited)
+        except Exception as e:
+            log.warning("Сбой верификации ответа: %s", e)
+        if verification.get("unsupported"):
+            answer = append_verification_warning(answer, verification["unsupported"])
+            log.info("Verification: %d неподтверждённых утверждений",
+                     len(verification["unsupported"]))
+
+    return {
+        "answer": answer,
+        "cited_chunks": cited,
+        "verification": verification,
+    }
 
 
 def _collect_cited(messages: list) -> list[dict[str, Any]]:

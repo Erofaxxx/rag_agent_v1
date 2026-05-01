@@ -12,7 +12,9 @@ log = logging.getLogger(__name__)
 
 def parse_pdf(path: str | Path) -> list[ParsedSegment]:
     """Извлекает текст постранично через PyMuPDF. Если средний объём текста
-    на страницу мал — считаем, что это скан, и прогоняем OCR."""
+    на страницу мал — считаем, что это скан, и прогоняем OCR. Дополнительно
+    через pdfplumber вытаскиваем таблицы — они идут отдельными сегментами,
+    отрендеренными в Markdown, чтобы при поиске не размывались между строками."""
     doc = fitz.open(str(path))
     segments: list[ParsedSegment] = []
     total_chars = 0
@@ -39,7 +41,76 @@ def parse_pdf(path: str | Path) -> list[ParsedSegment]:
             avg_per_page,
         )
         return _ocr_pdf(path)
+
+    # Таблицы — отдельные сегменты, чтобы при чанкинге не порвать строку
+    # между двумя чанками. Из текстового потока PyMuPDF их тоже вытащит, но
+    # без структуры.
+    table_segments = _extract_tables(path)
+    if table_segments:
+        log.info("PDF %s: добавлено %d таблиц", path, len(table_segments))
+        segments.extend(table_segments)
     return segments
+
+
+def _extract_tables(path: str | Path) -> list[ParsedSegment]:
+    """Достаёт таблицы постранично через pdfplumber и рендерит в Markdown.
+    Если pdfplumber не установлен — возвращаем пустой список (мягкий фолбэк)."""
+    try:
+        import pdfplumber
+    except Exception as e:
+        log.debug("pdfplumber не установлен (%s), таблицы PDF не извлекаются", e)
+        return []
+
+    out: list[ParsedSegment] = []
+    try:
+        with pdfplumber.open(str(path)) as pdf:
+            for i, page in enumerate(pdf.pages):
+                try:
+                    tables = page.extract_tables() or []
+                except Exception as e:
+                    log.debug("pdfplumber.extract_tables(стр.%d) ошибся: %s", i + 1, e)
+                    continue
+                for ti, table in enumerate(tables):
+                    md = _table_to_markdown(table)
+                    if not md:
+                        continue
+                    out.append(
+                        ParsedSegment(
+                            text=f"[Таблица {ti + 1} на стр. {i + 1}]\n{md}",
+                            page_number=i + 1,
+                            metadata={"source_type": "pdf", "kind": "table"},
+                        )
+                    )
+    except Exception as e:
+        log.warning("pdfplumber падает на %s: %s", path, e)
+    return out
+
+
+def _table_to_markdown(rows: list[list[Any]] | None) -> str:
+    """Минимальный рендер списка строк в Markdown-таблицу. Пустые/нечитаемые
+    ячейки заменяем пустой строкой, чтобы не ломать ширину."""
+    if not rows or len(rows) < 2:
+        # 1-строчная «таблица» обычно ложно-положительная (одна большая ячейка).
+        return ""
+    max_cols = max(len(r) for r in rows if r)
+    if max_cols < 2:
+        return ""
+
+    def cell(x: Any) -> str:
+        if x is None:
+            return ""
+        s = str(x).replace("\n", " ").replace("|", "/").strip()
+        return s
+
+    header = rows[0]
+    body = rows[1:]
+    head_cells = [cell(c) for c in header] + [""] * (max_cols - len(header))
+    md = "| " + " | ".join(head_cells) + " |\n"
+    md += "| " + " | ".join(["---"] * max_cols) + " |\n"
+    for r in body:
+        cells = [cell(c) for c in r] + [""] * (max_cols - len(r))
+        md += "| " + " | ".join(cells) + " |\n"
+    return md.rstrip()
 
 
 def extract_pdf_spans(path: str | Path) -> dict[int, dict[str, Any]]:

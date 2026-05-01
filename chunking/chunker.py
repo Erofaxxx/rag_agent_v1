@@ -1,10 +1,43 @@
-from typing import Any
+import logging
+from typing import Any, Optional
 
 from config import settings
 from parsers.base import ParsedSegment
 
+log = logging.getLogger(__name__)
+
 
 SEPARATORS: list[str] = ["\n## ", "\n### ", "\n\n", "\n", ". ", " ", ""]
+
+
+def adaptive_chunk_params(
+    file_type: Optional[str],
+    total_chars: int,
+) -> tuple[int, int]:
+    """Возвращает (chunk_size, overlap) под тип документа.
+
+    Коротко: длинные нарративы (PDF) выигрывают от больших чанков с щедрым
+    overlap'ом; табличные данные (XLSX/CSV) — от маленьких чанков с
+    минимальным overlap'ом, чтобы строка не размывалась через границу;
+    презентации (PPTX) — короткие, потому что слайд сам по себе атомарная
+    единица, и переплетать их не надо."""
+    if not settings.CHUNK_ADAPTIVE:
+        return settings.CHUNK_SIZE, settings.CHUNK_OVERLAP
+
+    ft = (file_type or "").lower()
+    if ft in {"xlsx", "xls", "csv"}:
+        return 1200, 150
+    if ft == "pptx":
+        return 1500, 200
+    if ft in {"docx", "doc", "md", "markdown", "txt"}:
+        return 2400, 400
+    if ft == "pdf":
+        # Для длинных PDF берём более крупные чанки — иначе одна тема
+        # размазывается на 6-8 фрагментов и retrieval приносит дубликаты.
+        if total_chars > 200_000:
+            return 3000, 500
+        return 2400, 400
+    return settings.CHUNK_SIZE, settings.CHUNK_OVERLAP
 
 
 def _split_text(text: str, chunk_size: int, overlap: int) -> list[str]:
@@ -66,21 +99,95 @@ def _add_overlap(chunks: list[str], overlap: int) -> list[str]:
     return out
 
 
+def _semantic_split(text: str, chunk_size: int, overlap: int) -> list[str]:
+    """Разбивает текст по абзацам, эмбеддит соседние и склеивает их в чанки,
+    пока косинусная схожесть выше порога ИЛИ пока не превышен chunk_size.
+
+    Это снимает классический разрыв «посреди объяснения»: если два абзаца
+    говорят про одно — они окажутся в одном чанке, даже если суммарно
+    почти 2*chunk_size. Если про разное — граница пройдёт между ними.
+
+    Стоит времени: на каждый абзац — 1 запрос в embedding API. На большом
+    документе это десятки секунд. Поэтому фича опциональна.
+    """
+    paragraphs = [p.strip() for p in text.split("\n\n") if p.strip()]
+    if len(paragraphs) <= 1:
+        return _split_text(text, chunk_size, overlap)
+
+    # Длинные параграфы сразу режем структурно — embed на 5K-абзаце смысла мало
+    expanded: list[str] = []
+    for p in paragraphs:
+        if len(p) > chunk_size:
+            expanded.extend(_split_text(p, chunk_size, overlap))
+        else:
+            expanded.append(p)
+    paragraphs = expanded
+    if len(paragraphs) <= 1:
+        return paragraphs
+
+    try:
+        # Локальный импорт — чтобы chunker не тащил эмбеддинг при инициализации
+        from embeddings import embedding_service
+        import numpy as np  # noqa: WPS433 — используется только при включённом семантическом
+        vecs = embedding_service.encode_passages(paragraphs)
+    except Exception as e:
+        log.warning("CHUNK_SEMANTIC=true, но embedding для чанкинга упал (%s). "
+                    "Fallback на структурный сплит.", e)
+        return _split_text(text, chunk_size, overlap)
+
+    threshold = settings.CHUNK_SEMANTIC_THRESHOLD
+    chunks: list[str] = []
+    current = paragraphs[0]
+    for i in range(1, len(paragraphs)):
+        sim = float(np.dot(vecs[i - 1], vecs[i]))  # vecs нормализованы → cosine
+        next_p = paragraphs[i]
+        if sim >= threshold and len(current) + len(next_p) + 2 <= chunk_size:
+            current = f"{current}\n\n{next_p}"
+        else:
+            chunks.append(current.strip())
+            current = next_p
+    if current.strip():
+        chunks.append(current.strip())
+    return _add_overlap(chunks, overlap)
+
+
 def chunk_segments(
     segments: list[ParsedSegment],
     chunk_size: int | None = None,
     chunk_overlap: int | None = None,
+    file_type: Optional[str] = None,
 ) -> list[dict[str, Any]]:
     """На вход — сегменты от парсеров. На выход — плоский список словарей
-    готовых для записи в БД и эмбеддинга."""
-    cs = chunk_size or settings.CHUNK_SIZE
-    ov = chunk_overlap or settings.CHUNK_OVERLAP
+    готовых для записи в БД и эмбеддинга.
+
+    Если chunk_size/chunk_overlap не заданы:
+    - используется adaptive_chunk_params(file_type, total_chars), если
+      CHUNK_ADAPTIVE=true;
+    - иначе берутся CHUNK_SIZE / CHUNK_OVERLAP из settings.
+
+    Если CHUNK_SEMANTIC=true — для каждого сегмента используется
+    semantic-сплит через эмбеддинги соседних абзацев (см. _semantic_split).
+    """
+    total_chars = sum(len(s.text or "") for s in segments)
+    if chunk_size is None or chunk_overlap is None:
+        cs_auto, ov_auto = adaptive_chunk_params(file_type, total_chars)
+        cs = chunk_size if chunk_size is not None else cs_auto
+        ov = chunk_overlap if chunk_overlap is not None else ov_auto
+    else:
+        cs, ov = chunk_size, chunk_overlap
+
+    log.info(
+        "Chunking: file_type=%s, total_chars=%d → chunk_size=%d, overlap=%d, semantic=%s",
+        file_type, total_chars, cs, ov, settings.CHUNK_SEMANTIC,
+    )
+
+    splitter = _semantic_split if settings.CHUNK_SEMANTIC else _split_text
     out: list[dict[str, Any]] = []
     idx = 0
     for seg in segments:
         if not seg.text or not seg.text.strip():
             continue
-        for piece in _split_text(seg.text, cs, ov):
+        for piece in splitter(seg.text, cs, ov):
             out.append(
                 {
                     "chunk_index": idx,
