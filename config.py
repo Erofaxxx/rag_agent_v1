@@ -10,7 +10,7 @@ class Settings(BaseSettings):
     OPENROUTER_API_KEY: str
     LLM_MODEL: str = "deepseek/deepseek-chat"
     LLM_TEMPERATURE: float = 0.1
-    LLM_MAX_TOKENS: int = 2000
+    LLM_MAX_TOKENS: int = 8000
     OPENROUTER_HTTP_REFERER: str = "http://localhost"
     OPENROUTER_X_TITLE: str = "RAG Agent"
 

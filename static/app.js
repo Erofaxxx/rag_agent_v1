@@ -1410,6 +1410,7 @@ function bindEvents() {
     els.dropZone.addEventListener("dragleave", () => els.dropZone.classList.remove("dragging"));
     els.dropZone.addEventListener("drop", async e => {
         e.preventDefault();
+        e.stopPropagation();
         els.dropZone.classList.remove("dragging");
         const files = await getFilesFromDataTransfer(e.dataTransfer);
         if (files.length) await uploadFiles(files);
@@ -1448,6 +1449,9 @@ function bindEvents() {
         e.preventDefault();
         dragCounter = 0;
         overlay.classList.add("hidden");
+        // Если drop пришёл внутрь dropZone — там уже свой handler с stopPropagation,
+        // но на всякий случай дополнительно проверяем, чтобы не загрузить файлы дважды.
+        if (e.target && e.target.closest && e.target.closest("#dropZone")) return;
         const files = await getFilesFromDataTransfer(e.dataTransfer);
         if (!files.length) return;
         // Если юзер не админ-only режим, открываем панель чтобы видно было прогресс

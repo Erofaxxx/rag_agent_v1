@@ -232,13 +232,17 @@ def get_document_file(document_id: int, user: UserRow = Depends(require_user)):
         "md": "text/markdown; charset=utf-8",
         "csv": "text/csv; charset=utf-8",
     }
+    # Content-Disposition НЕ ставим вручную: starlette сам формирует его из
+    # filename= с RFC 5987-кодированием (filename*=UTF-8''...) — нужно для
+    # имён с кириллицей, иначе latin-1 кодирование заголовков падает в
+    # UnicodeEncodeError → 500. content_disposition_type="inline" даёт
+    # iframe-показ PDF вместо принудительного скачивания.
     return FileResponse(
         path=str(p),
         media_type=media_types.get(doc.file_type, "application/octet-stream"),
         filename=doc.filename,
+        content_disposition_type="inline",
         headers={
-            # Inline для PDF чтобы открывалось в iframe, а не предлагало скачать
-            "Content-Disposition": f'inline; filename="{doc.filename}"',
             "X-Frame-Options": "SAMEORIGIN",  # переопределяем глобальный DENY
         },
     )
