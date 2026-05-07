@@ -1,5 +1,7 @@
 # RAG Agent
 
+> 🤖 **Агенту в новом чате:** для прогона security-тестов после деплоя — [`SECURITY_RUNBOOK.md`](SECURITY_RUNBOOK.md). Контекст: [`PROJECT_README.md`](PROJECT_README.md).
+
 Корпоративный RAG-помощник по документам с регистрацией пользователей и
 админ-панелью.
 
