@@ -10,7 +10,12 @@ from langgraph.prebuilt import create_react_agent
 
 from config import settings
 from llm.prompts import SYSTEM_PROMPT, build_system_prompt
-from llm.verifier import append_verification_warning, verify_answer
+from llm.verifier import (
+    append_strict_warning,
+    append_verification_warning,
+    strict_verify,
+    verify_answer,
+)
 from search import search_service, SearchHit
 from storage import db
 
@@ -353,10 +358,25 @@ def answer_question(
             log.info("Verification: %d неподтверждённых утверждений",
                      len(verification["unsupported"]))
 
+    # ---- Defense L4: strict verifier на самих cited chunks ----
+    # Проверяем найденные фрагменты на injection-паттерны. Если LLM выдала
+    # ответ с цитированием отравленного чанка — добавляем плашку безопасности.
+    # Не делает LLM-вызовов, всё на регексах.
+    strict: dict[str, Any] = {"suspicious": False, "findings": []}
+    if settings.DEFENSE_L4_STRICT_VERIFIER and cited:
+        try:
+            strict = strict_verify(cited)
+            if strict.get("suspicious"):
+                answer = append_strict_warning(answer, strict)
+                log.info("[L4] suspicious findings: %d", len(strict.get("findings") or []))
+        except Exception as e:
+            log.warning("[L4] strict verifier failed: %s", e)
+
     return {
         "answer": answer,
         "cited_chunks": cited,
         "verification": verification,
+        "strict": strict,
     }
 
 
