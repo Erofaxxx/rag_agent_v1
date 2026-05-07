@@ -157,10 +157,17 @@ def _build_search_tool(state: _RequestState):
                 if l3_report.suspicious_chunk_ids:
                     fname_by_cid = {h.chunk.id: h.document.filename for h in hits}
                     if settings.DEFENSE_L3_QUERY_ABLATION == "drop":
+                        before_n = len(hits)
+                        before_files = sorted({h.document.filename for h in hits})
                         hits = _l3_filter(hits, l3_report, mode="drop")
+                        after_n = len(hits)
+                        after_files = sorted({h.document.filename for h in hits})
                         log.info(
-                            "[L3] выкинуто %d chunks из выдачи (drop mode)",
-                            len(l3_report.suspicious_chunk_ids),
+                            "[L3] drop: %d → %d hits (suspicious chunks=%s); "
+                            "files before=%s; files after=%s",
+                            before_n, after_n,
+                            l3_report.suspicious_chunk_ids,
+                            before_files, after_files,
                         )
                     else:  # warn
                         # Плашку склеим в самом конце ответа агента — но
