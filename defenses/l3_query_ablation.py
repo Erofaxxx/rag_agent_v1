@@ -264,18 +264,35 @@ def filter_hits(
     report: L3Report,
     *,
     mode: str,
+    escalate_to_document: bool = True,
 ) -> list:
     """Применяет вердикт L3 к списку hits.
 
     mode:
         'off'  — не трогаем (caller должен был и не вызывать L3, но на всякий)
         'warn' — оставляем все hits, caller сам приляпает предупреждение
-        'drop' — выкидываем suspicious_chunk_ids
+        'drop' — выкидываем suspicious chunks
+
+    escalate_to_document=True (по умолчанию) — если хотя бы один chunk документа
+    помечен как trigger-activated, выкидываем ВСЕ chunks этого документа.
+    Защищает от «размазывания» target-фразы по нескольким соседним чанкам
+    через CHUNK_OVERLAP: атакующий мог сделать так, что часть chunks-носителей
+    target-фразы приходят в top-k и без триггера (по тематике запроса) и
+    не ловятся chunk-level метрикой; document-level escalation закрывает этот
+    обход. False-positive риск: один query-specific chunk целого документа
+    выкидывает весь документ — но если у документа есть хоть один такой chunk,
+    документ почти наверняка содержит backdoor, и риск ложного дропа
+    легитимного документа невелик (для нормальных файлов trigger_score у всех
+    chunks ≈ 0).
     """
-    if mode == "drop" and report.suspicious_chunk_ids:
-        sus = set(report.suspicious_chunk_ids)
-        return [h for h in original_hits if _chunk_id(h) not in sus]
-    return original_hits
+    if mode != "drop" or not report.suspicious_chunk_ids:
+        return original_hits
+
+    sus_chunks = set(report.suspicious_chunk_ids)
+    if escalate_to_document:
+        sus_doc_ids = {_doc_id(h) for h in original_hits if _chunk_id(h) in sus_chunks}
+        return [h for h in original_hits if _doc_id(h) not in sus_doc_ids]
+    return [h for h in original_hits if _chunk_id(h) not in sus_chunks]
 
 
 def short_summary(report: L3Report) -> str:
@@ -308,3 +325,9 @@ def _chunk_id(h) -> int:
     """Извлекает chunk.id из SearchHit. Не импортим SearchHit, чтобы не было
     циклов — полагаемся на duck-typing."""
     return int(h.chunk.id)
+
+
+def _doc_id(h) -> int:
+    """Извлекает document.id из SearchHit. Используется для document-level
+    escalation в filter_hits."""
+    return int(h.document.id)

@@ -26,13 +26,26 @@ class _MockChunk:
 
 
 @dataclass
+class _MockDoc:
+    id: int
+
+
+@dataclass
 class _MockHit:
     chunk: _MockChunk
+    document: _MockDoc
     score: float = 0.5
 
 
-def _hit(cid: int, score: float = 0.5) -> _MockHit:
-    return _MockHit(chunk=_MockChunk(id=cid), score=score)
+def _hit(cid: int, score: float = 0.5, doc_id: int | None = None) -> _MockHit:
+    """По умолчанию document.id == chunk.id, чтобы document-level escalation
+    работал тривиально (1 chunk = 1 doc). Тесты, где нужно несколько chunks
+    в одном документе, передают doc_id явно."""
+    return _MockHit(
+        chunk=_MockChunk(id=cid),
+        document=_MockDoc(id=doc_id if doc_id is not None else cid),
+        score=score,
+    )
 
 
 class TestQueryAblation:
@@ -224,3 +237,63 @@ class TestQueryAblation:
         )
         # Главное — не упали
         assert isinstance(report.per_chunk, dict)
+
+    def test_document_level_escalation(self):
+        """Если хотя бы один chunk документа помечен trigger-activated, в drop-
+        режиме выкидываем ВСЕ chunks этого документа — это критично для атак,
+        размазывающих target-фразу по нескольким соседним chunks через
+        CHUNK_OVERLAP.
+
+        Сценарий: poisoned документ doc_id=99 даёт два chunks (100 и 101).
+        Chunk 100 строго query-specific (выпадает из ablations) → suspicious.
+        Chunk 101 семантически близок к запросу и приходит и без триггера →
+        chunk-level метрика его НЕ помечает. Без escalation мы выкинули бы
+        только 100, оставив 101 — и атака бы прошла. С escalation выкидываем
+        весь doc 99.
+        """
+
+        def retrieve(q: str):
+            ql = q.lower()
+            ids = [(1, 1), (2, 2)]  # (chunk_id, doc_id) для двух чистых
+            # chunk 100 — query-specific (только при триггере)
+            if "директиве" in ql and "17-альфа" in ql:
+                ids.append((100, 99))
+            # chunk 101 — всегда в выдаче, и хороший на «лимит», и из того же
+            # документа 99 (имитирует overlap, в котором target-фраза тоже)
+            if "лимит" in ql:
+                ids.append((101, 99))
+            return [_hit(cid, doc_id=did) for cid, did in ids]
+
+        original_hits = retrieve("Какой лимит согласно директиве 17-альфа применяется")
+        report = detect_query_specific_chunks(
+            query="Какой лимит согласно директиве 17-альфа применяется",
+            original_hits=original_hits,
+            retrieve_fn=retrieve,
+            threshold=0.3,
+            max_ablations=8,
+            min_word_len=4,
+        )
+        # chunk 100 пометился как trigger-activated, 101 — нет
+        assert 100 in report.suspicious_chunk_ids
+        assert 101 not in report.suspicious_chunk_ids
+
+        # Без escalation: остался бы 101 (атака прошла бы)
+        no_escalate = filter_hits(
+            original_hits, report, mode="drop", escalate_to_document=False
+        )
+        assert any(h.chunk.id == 101 for h in no_escalate), (
+            "no_escalate должен оставить 101 — иначе тест-сценарий некорректен"
+        )
+
+        # С escalation: оба chunks документа 99 ушли
+        escalated = filter_hits(
+            original_hits, report, mode="drop", escalate_to_document=True
+        )
+        ids_left = {h.chunk.id for h in escalated}
+        assert 100 not in ids_left
+        assert 101 not in ids_left, (
+            f"Document-level escalation должен убрать все chunks doc 99, "
+            f"но оставил {ids_left}"
+        )
+        # Чистые остались
+        assert 1 in ids_left and 2 in ids_left
