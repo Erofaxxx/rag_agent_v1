@@ -91,11 +91,54 @@ def _process_document(document_id: int) -> None:
         if not chunks:
             raise ValueError("После чанкинга не осталось ни одного фрагмента")
 
+        # ---- Defense L1: ingest-time sanitization (security research) ----
+        # По умолчанию выключено (settings.DEFENSE_L1_SANITIZE='off'). Если
+        # включено — пропускаем чанки через regex-детектор инъекций. В режиме
+        # 'warn' просто логируем, в 'drop' — отбрасываем чанки с risk выше
+        # порога. Никогда не подменяет содержимое чанка молча.
+        l1_report = None
+        if settings.DEFENSE_L1_SANITIZE != "off":
+            from defenses.l1_sanitize import sanitize_chunks, short_summary as l1_summary
+            chunks, l1_report = sanitize_chunks(
+                chunks,
+                mode=settings.DEFENSE_L1_SANITIZE,
+                threshold=settings.DEFENSE_L1_RISK_THRESHOLD,
+            )
+            log.info("[L1] Документ %s: %s", document_id, l1_summary(l1_report))
+            if not chunks:
+                raise ValueError(
+                    "L1 sanitization отбросил все чанки документа "
+                    "(возможно, документ полностью состоит из prompt-injection)"
+                )
+
         chunk_ids = db.insert_chunks(document_id, chunks)
         log.info("Документ %s: %d чанков, эмбеддю...", document_id, len(chunks))
 
         texts = [c["text"] for c in chunks]
         vectors = embedding_service.encode_passages(texts)
+
+        # ---- Defense L2: per-document embedding anomaly detection ----
+        # Считаем z-score cosine-расстояния каждого чанка до центроида
+        # документа. Чанки-outliers логируем (а в режиме 'drop' выкидываем).
+        l2_report = None
+        if settings.DEFENSE_L2_ANOMALY != "off":
+            from defenses.l2_embedding_anomaly import detect_anomalies, short_summary as l2_summary
+            l2_report = detect_anomalies(
+                vectors,
+                z_threshold=settings.DEFENSE_L2_ZSCORE_THRESHOLD,
+            )
+            log.info("[L2] Документ %s: %s", document_id, l2_summary(l2_report))
+            if settings.DEFENSE_L2_ANOMALY == "drop" and l2_report.n_flagged > 0:
+                # Фильтруем chunks, chunk_ids и vectors параллельно по флагам.
+                kept_idx = [i for i, f in enumerate(l2_report.flags) if not f]
+                if kept_idx:
+                    import numpy as _np
+                    chunk_ids = [chunk_ids[i] for i in kept_idx]
+                    vectors = _np.asarray([vectors[i] for i in kept_idx])
+                    log.info("[L2] %d чанков отброшено", len(l2_report.flags) - len(kept_idx))
+                else:
+                    raise ValueError("L2 пометил все чанки как аномалии — документ выглядит подозрительно целиком")
+
         faiss_index.add(vectors, chunk_ids)
         faiss_index.persist()
         search_service.invalidate_bm25()

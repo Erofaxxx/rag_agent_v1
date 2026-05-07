@@ -151,3 +151,39 @@ def append_verification_warning(answer: str, unsupported: list[str]) -> str:
         f"⚠️ Часть утверждений напрямую не подтверждена найденными фрагментами; "
         f"перепроверьте по источникам:\n{lines}"
     )
+
+
+def strict_verify(
+    cited_chunks: list[dict[str, Any]],
+) -> dict[str, Any]:
+    """L4: проверка cited chunks на injection-паттерны (регексами L1).
+
+    Не делает LLM-вызовов — дёшево. Используется в llm/agent.py
+    параллельно с verify_answer, когда settings.DEFENSE_L4_STRICT_VERIFIER=True.
+
+    Возвращает {"suspicious": bool, "findings": [...]}.
+    """
+    if not settings.DEFENSE_L4_STRICT_VERIFIER:
+        return {"suspicious": False, "findings": []}
+    try:
+        from defenses.l4_strict_verifier import inspect_cited_chunks
+        report = inspect_cited_chunks(cited_chunks)
+        return report.to_dict()
+    except Exception as e:
+        log.warning("strict_verify failed: %s", e)
+        return {"suspicious": False, "findings": []}
+
+
+def append_strict_warning(answer: str, strict: dict[str, Any]) -> str:
+    """Дописывает плашку L4 в конец ответа, если что-то нашлось."""
+    if not strict or not strict.get("suspicious"):
+        return answer
+    try:
+        from defenses.l4_strict_verifier import StrictReport, build_warning
+        report = StrictReport(suspicious=True, findings=strict.get("findings") or [])
+        warning = build_warning(report)
+    except Exception:
+        warning = ""
+    if not warning:
+        return answer
+    return f"{answer.rstrip()}{warning}"

@@ -66,3 +66,6 @@ htmlcov/
 
 # Local Claude preview tooling (mock server, launch config)
 .claude/
+
+# Security research artifacts (генерируются eval/generate_corpus.py)
+benchmarks/

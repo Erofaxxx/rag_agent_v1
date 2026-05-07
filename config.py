@@ -171,6 +171,35 @@ class Settings(BaseSettings):
     OCR_LANGUAGES: str = "rus+eng"
     OCR_MIN_CHARS_PER_PAGE: int = 100
 
+    # ---- Security research: poisoning / backdoor defenses ----
+    # Все флаги по умолчанию выключены — поведение агента не меняется,
+    # пока кто-то осознанно не включит защиты в .env. Это позволяет
+    # сначала прогнать базовый сценарий (агент работает как раньше),
+    # потом снять метрики атак, и только затем включать защиты слой за слоем.
+
+    # L1: sanitization чанков на ingest. Ищет prompt-injection паттерны,
+    # role-switch, фейковые цитаты в тексте, подозрительные unicode-блоки.
+    # Действие: 'off' (только лог), 'warn' (помечает risk_score), 'drop'
+    # (отбрасывает чанки выше порога — НЕ ставь в prod без аудита).
+    DEFENSE_L1_SANITIZE: str = "off"
+    DEFENSE_L1_RISK_THRESHOLD: float = 0.6
+
+    # L2: embedding-space anomaly detection. По эмбеддингам чанков считаем
+    # центроид документа и расстояние; чанки с z-score выше порога флагуются.
+    # Действие аналогично L1.
+    DEFENSE_L2_ANOMALY: str = "off"
+    DEFENSE_L2_ZSCORE_THRESHOLD: float = 2.5
+
+    # L4: расширенный верификатор ответа. К текущему verify_answer добавляет
+    # проверку injection-паттернов в самих cited chunks — если триггер
+    # «прошёл» в LLM, в ответе появится явное предупреждение.
+    DEFENSE_L4_STRICT_VERIFIER: bool = False
+
+    # Тестовый bypass-режим для security research. Когда включён, в API
+    # появляется endpoint /api/security/* для прогонки eval-скриптов
+    # (загрузка poisoned-докorpus, сбор метрик). Никогда не включать в prod.
+    SECURITY_RESEARCH_MODE: bool = False
+
     @property
     def data_path(self) -> Path:
         p = Path(self.DATA_DIR).expanduser().resolve()
