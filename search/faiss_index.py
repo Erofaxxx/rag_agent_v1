@@ -131,6 +131,13 @@ class SearchService:
         self._bm25_ids: list[int] = []
         self._bm25_lock = threading.Lock()
 
+    @staticmethod
+    def _tokenize_bm25(text: str) -> list[str]:
+        """Простая нормализация: \\w+ ловит русские/латинские слова и цифры,
+        отбрасывая знаки препинания. .split() этого не делал — пунктуация
+        прилипала к токенам и BM25 промахивался."""
+        return re.findall(r"\w+", text.lower(), flags=re.UNICODE)
+
     def _ensure_bm25(self) -> None:
         if not settings.SEARCH_USE_BM25:
             return
@@ -146,8 +153,14 @@ class SearchService:
             if not data:
                 return
             self._bm25_ids = [i for i, _ in data]
-            tokenized = [t.lower().split() for _, t in data]
+            tokenized = [self._tokenize_bm25(t) for _, t in data]
             self._bm25 = BM25Okapi(tokenized)
+
+    def warmup(self) -> None:
+        """Вызывается из lifespan на старте: строит BM25 заранее, чтобы
+        первый запрос после рестарта не платил O(N) и не получал
+        thundering-herd из N параллельных запросов, ждущих один лок."""
+        self._ensure_bm25()
 
     def invalidate_bm25(self) -> None:
         with self._bm25_lock:
@@ -161,14 +174,20 @@ class SearchService:
         if not settings.SEARCH_USE_BM25:
             return []
         self._ensure_bm25()
-        if self._bm25 is None or not self._bm25_ids:
+        # Под локом снимаем локальные ссылки. Иначе invalidate_bm25() из
+        # параллельного потока (после удаления документа) может обнулить
+        # self._bm25 между проверкой None и get_scores → AttributeError.
+        with self._bm25_lock:
+            bm25 = self._bm25
+            ids = list(self._bm25_ids)
+        if bm25 is None or not ids:
             return []
-        tokens = query.lower().split()
+        tokens = self._tokenize_bm25(query)
         if not tokens:
             return []
-        scores = self._bm25.get_scores(tokens)
+        scores = bm25.get_scores(tokens)
         top_idx = np.argsort(scores)[::-1][:k]
-        return [self._bm25_ids[i] for i in top_idx if scores[i] > 0]
+        return [ids[i] for i in top_idx if scores[i] > 0]
 
     def _dense_top(self, query: str, k: int, hyde_text: Optional[str] = None) -> list[tuple[int, float]]:
         """Dense top-k id со score. Если задан hyde_text, эмбеддим запрос +
@@ -236,6 +255,8 @@ class SearchService:
         k: Optional[int] = None,
         owner_user_id: Optional[int] = None,
         notebook_id: Optional[int] = None,
+        *,
+        ablation_mode: bool = False,
     ) -> list[SearchHit]:
         """Главная точка входа. Конвейер:
 
@@ -246,6 +267,12 @@ class SearchService:
 
         Все слои опциональны и контролируются настройками. Если всё выключить,
         получим прежний dense-only поиск.
+
+        ablation_mode=True — «голый» режим для L3 query-ablation детектора:
+        отключает multi-query, HyDE и reformulate-on-low (они размывают эффект
+        одиночной ablation), оставляет dense+BM25+RRF+rerank. Используется
+        изнутри defenses/l3_query_ablation, обычные вызовы должны передавать
+        False (по умолчанию).
         """
         from search.entity_detector import adaptive_top_k, detect_entities, detect_intent
         from search.query_expansion import hyde, multi_query, reformulate
@@ -275,15 +302,21 @@ class SearchService:
             hits = self._search_bm25_only(query, base_k, owner_user_id, notebook_id)
             return rerank(query, hits, base_k) if hits else hits
 
-        # Multi-query + HyDE
+        # Multi-query + HyDE — выключаем в ablation_mode: caller хочет видеть
+        # эффект удаления одного слова, а multi-query восстановит «забытый»
+        # триггер через перефразировку и спрячет сигнатуру.
         intent = detect_intent(query)
         queries = [query]
-        if settings.SEARCH_MULTI_QUERY and settings.SEARCH_MULTI_QUERY_COUNT > 1:
+        if (
+            not ablation_mode
+            and settings.SEARCH_MULTI_QUERY
+            and settings.SEARCH_MULTI_QUERY_COUNT > 1
+        ):
             queries = multi_query(query, n_extra=settings.SEARCH_MULTI_QUERY_COUNT - 1)
             if not queries:
                 queries = [query]
         hyde_text: Optional[str] = None
-        if settings.SEARCH_HYDE and intent == "definition":
+        if not ablation_mode and settings.SEARCH_HYDE and intent == "definition":
             hyde_text = hyde(query)
 
         hits = self._search_with_queries(
@@ -294,10 +327,12 @@ class SearchService:
             notebook_id=notebook_id,
         )
 
-        # Если средний score топ-3 слишком низкий — пробуем переформулировать
-        # один раз. Без этого LLM получит мусорные кандидаты и может галлюцинировать.
+        # Reformulate-on-low тоже отключаем в ablation_mode — оно ссылается на
+        # «hint terms» из исходных hits и может вернуть obfuscated query, что
+        # снова восстановит триггер.
         if (
-            settings.SEARCH_REFORMULATE_ON_LOW
+            not ablation_mode
+            and settings.SEARCH_REFORMULATE_ON_LOW
             and hits
             and _avg_top_score(hits, n=3) < settings.SEARCH_LOW_SCORE_THRESHOLD
         ):
@@ -316,7 +351,9 @@ class SearchService:
                 if alt_hits and _avg_top_score(alt_hits, n=3) > _avg_top_score(hits, n=3):
                     hits = alt_hits
 
-        # Реранк top-N → top-K
+        # Реранк top-N → top-K. В ablation_mode тоже реранкаем, потому что
+        # top-k из L3-ablation сравниваются с top-k оригинального запроса
+        # (тоже после rerank) — должно быть в одной шкале.
         return rerank(query, hits, base_k)
 
     def _search_with_queries(

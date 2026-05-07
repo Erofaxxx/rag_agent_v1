@@ -1,6 +1,8 @@
+import functools
 import logging
 import re
 import threading
+from dataclasses import dataclass, field
 from typing import Any, Optional
 
 from langchain_core.messages import AIMessage, HumanMessage, SystemMessage, ToolMessage
@@ -21,47 +23,40 @@ from storage import db
 
 
 # Tool-message в результате содержит блоки `[chunk_id=N] [source] [score=X.XXX]`.
-# В langgraph 0.2.x sync-тулы выполняются в отдельном thread у ToolNode, и
-# threading.local() из вызывающего потока туда не пробрасывается. Поэтому
-# вместо thread-local берём chunk_id напрямую из текста ToolMessage.
+# Из ToolMessage достаём chunk_id для построения cited_chunks.
 _CITED_RE = re.compile(r"\[chunk_id=(\d+)\] \[([^\]]+)\] \[score=([0-9.]+)\]")
 
 log = logging.getLogger(__name__)
 
 
-# --- thread-local: текущие найденные чанки за один turn ---
-# Чтобы не таскать их через сообщения и не плодить токены, агент пишет
-# сюда из тула, а ручка чата забирает после .invoke().
-_thread_local = threading.local()
+@dataclass
+class _RequestState:
+    """Состояние одного вызова агента. Строится в answer_question, передаётся
+    в tool через замыкание. Раньше было thread-local, но langgraph 0.2.x
+    выполняет sync-тулы на воркер-треде из пула — threading.local() оттуда
+    не виден, и хуже того, тред мог обслуживать запрос другого пользователя
+    в прошлый раз, что приводило к утечке корпуса между арендаторами.
+
+    `lock` синхронизирует tool_calls/hits между параллельными tool-вызовами:
+    в обычном create_react_agent они сериализуются, но parallel_tool_calls и
+    другие будущие изменения LangGraph могут запустить два search_documents
+    одновременно — без лока счётчик ловит race и cap MAX_TOOL_CALLS перестаёт
+    защищать."""
+
+    user_id: Optional[int]
+    notebook_id: Optional[int]
+    hits: list[SearchHit] = field(default_factory=list)
+    tool_calls: int = 0
+    lock: threading.Lock = field(default_factory=threading.Lock)
 
 
-def _reset_thread_state(user_id: Optional[int], notebook_id: Optional[int] = None) -> None:
-    _thread_local.hits = []
-    _thread_local.user_id = user_id
-    _thread_local.notebook_id = notebook_id
-    _thread_local.tool_calls = 0
-
-
-def _get_hits() -> list[SearchHit]:
-    return getattr(_thread_local, "hits", [])
-
-
-def _get_user_id() -> Optional[int]:
-    return getattr(_thread_local, "user_id", None)
-
-
-def _get_notebook_id() -> Optional[int]:
-    return getattr(_thread_local, "notebook_id", None)
-
-
-def _add_hits(hits: list[SearchHit]) -> None:
-    existing = getattr(_thread_local, "hits", [])
-    seen = {h.chunk.id for h in existing}
-    for h in hits:
-        if h.chunk.id not in seen:
-            existing.append(h)
-            seen.add(h.chunk.id)
-    _thread_local.hits = existing
+def _add_hits(state: _RequestState, hits: list[SearchHit]) -> None:
+    with state.lock:
+        seen = {h.chunk.id for h in state.hits}
+        for h in hits:
+            if h.chunk.id not in seen:
+                state.hits.append(h)
+                seen.add(h.chunk.id)
 
 
 def _format_source(hit: SearchHit) -> str:
@@ -88,64 +83,121 @@ def _format_hits_for_llm(hits: list[SearchHit]) -> str:
     return "\n\n---\n\n".join(parts)
 
 
-@tool
-def search_documents(query: str) -> str:
-    """Поиск по загруженным документам. Возвращает релевантные фрагменты с указанием
-    имени файла и страницы / листа / слайда. Используй разные формулировки, если
-    первая выдача не дала ответа.
+def _build_search_tool(state: _RequestState):
+    """Создаёт tool с замыканием на per-request state. Скоуп пользователя/ноутбука
+    зашит в замыкание, поэтому даже если langgraph выполнит тул на чужом треде —
+    параметры берутся из state, а не из глобала."""
 
-    Args:
-        query: поисковый запрос на естественном языке (русский или английский).
-    """
-    # Hard cap на количество tool-вызовов за один turn — защита от runaway-итераций.
-    # Соответствует паттерну BudgetMiddleware из magnetto_agent_v2: вместо того
-    # чтобы упасть с recursion_limit, мягко отдаём LLM «лимит исчерпан, отвечай
-    # на основе того, что есть» и оставляем шанс сформировать финальный ответ.
-    used = getattr(_thread_local, "tool_calls", 0) + 1
-    _thread_local.tool_calls = used
-    cap = settings.MAX_TOOL_CALLS_PER_QUESTION
+    @tool
+    def search_documents(query: str) -> str:
+        """Поиск по загруженным документам. Возвращает релевантные фрагменты с указанием
+        имени файла и страницы / листа / слайда. Используй разные формулировки, если
+        первая выдача не дала ответа.
 
-    log.info("[tool] search_documents(%r) — call %d/%d", query, used, cap)
+        Args:
+            query: поисковый запрос на естественном языке (русский или английский).
+        """
+        # Hard cap на количество tool-вызовов за один turn — защита от runaway-итераций.
+        with state.lock:
+            state.tool_calls += 1
+            used = state.tool_calls
+        cap = settings.MAX_TOOL_CALLS_PER_QUESTION
 
-    if used > cap:
-        return (
-            f"Лимит поисковых запросов исчерпан ({cap}). Дай финальный ответ "
-            f"на основе уже найденных фрагментов или скажи, что данных в "
-            f"документах недостаточно. НЕ вызывай search_documents снова."
+        log.info("[tool] search_documents(%r) — call %d/%d", query, used, cap)
+
+        if used > cap:
+            return (
+                f"Лимит поисковых запросов исчерпан ({cap}). Дай финальный ответ "
+                f"на основе уже найденных фрагментов или скажи, что данных в "
+                f"документах недостаточно. НЕ вызывай search_documents снова."
+            )
+
+        hits = search_service.search(
+            query,
+            k=None,
+            owner_user_id=state.user_id,
+            notebook_id=state.notebook_id,
         )
 
-    user_id = _get_user_id()
-    notebook_id = _get_notebook_id()
-    # k=None даёт SearchService использовать адаптивный top-k (если включён в
-    # настройках). Все остальные качество-улучшающие слои (multi-query, HyDE,
-    # BM25, реранк, reformulate-on-low) встроены в search_service.search.
-    hits = search_service.search(
-        query,
-        k=None,
-        owner_user_id=user_id,
-        notebook_id=notebook_id,
-    )
-    _add_hits(hits)
+        # ---- Defense L3: query-ablation детектор trigger-based backdoor'ов ----
+        # Generic защита, работает на любых неизвестных триггерах: сравниваем
+        # top-k оригинального запроса с top-k запросов с удалённым по очереди
+        # каждым «значимым» словом. Чанк, который выпадает из top-k при
+        # ablation, активирован конкретными словами запроса → подозрителен.
+        # Все ablations — single-query через ablation_mode=True (без multi-query/
+        # HyDE/reformulate), иначе эффект размывается.
+        l3_warning = ""
+        if settings.DEFENSE_L3_QUERY_ABLATION != "off" and hits:
+            try:
+                from defenses.l3_query_ablation import (
+                    build_warning as _l3_warning,
+                    detect_query_specific_chunks,
+                    filter_hits as _l3_filter,
+                    short_summary as _l3_summary,
+                )
 
-    formatted = _format_hits_for_llm(hits)
-    # Soft warning при приближении к лимиту — даёт LLM шанс заранее группировать
-    # запросы или решить, что найденного достаточно.
-    remaining = cap - used
-    if remaining == 0:
-        formatted += "\n\n[Это был последний доступный поиск. Сейчас формируй финальный ответ.]"
-    elif remaining == 1:
-        formatted += "\n\n[Остался ещё 1 поиск. Используй его только если ответ ещё неполный.]"
-    return formatted
+                def _ablation_retrieve(q: str):
+                    return search_service.search(
+                        q,
+                        k=None,
+                        owner_user_id=state.user_id,
+                        notebook_id=state.notebook_id,
+                        ablation_mode=True,
+                    )
+
+                l3_report = detect_query_specific_chunks(
+                    query=query,
+                    original_hits=hits,
+                    retrieve_fn=_ablation_retrieve,
+                    threshold=settings.DEFENSE_L3_TRIGGER_THRESHOLD,
+                    max_ablations=settings.DEFENSE_L3_MAX_ABLATIONS,
+                    min_word_len=settings.DEFENSE_L3_MIN_WORD_LEN,
+                )
+                log.info("[L3] %s", _l3_summary(l3_report))
+                if l3_report.suspicious_chunk_ids:
+                    fname_by_cid = {h.chunk.id: h.document.filename for h in hits}
+                    if settings.DEFENSE_L3_QUERY_ABLATION == "drop":
+                        hits = _l3_filter(hits, l3_report, mode="drop")
+                        log.info(
+                            "[L3] выкинуто %d chunks из выдачи (drop mode)",
+                            len(l3_report.suspicious_chunk_ids),
+                        )
+                    else:  # warn
+                        # Плашку склеим в самом конце ответа агента — но
+                        # вернуть в тул-выходе нельзя (LLM её увидит как
+                        # часть выдачи). Поэтому копим в state и подмешиваем
+                        # в answer_question post-hoc.
+                        l3_warning = _l3_warning(l3_report, fname_by_cid)
+                        if l3_warning:
+                            with state.lock:
+                                # Имя поля — l3_warnings (список), на случай
+                                # нескольких search-вызовов в одном turn.
+                                if not hasattr(state, "l3_warnings"):
+                                    state.l3_warnings = []
+                                state.l3_warnings.append(l3_warning)
+            except Exception as e:
+                log.warning("[L3] упал, пропускаем (атака пройдёт незамеченной): %s", e)
+
+        _add_hits(state, hits)
+
+        formatted = _format_hits_for_llm(hits)
+        remaining = cap - used
+        if remaining == 0:
+            formatted += "\n\n[Это был последний доступный поиск. Сейчас формируй финальный ответ.]"
+        elif remaining == 1:
+            formatted += "\n\n[Остался ещё 1 поиск. Используй его только если ответ ещё неполный.]"
+        return formatted
+
+    return search_documents
 
 
-# --- ленивая инициализация LLM и агента (чтобы импорт модуля был дешёвым) ---
-
-_agent = None
-_agent_lock = threading.Lock()
-
-
-def _build_agent():
-    llm = ChatOpenAI(
+@functools.lru_cache(maxsize=1)
+def _get_llm() -> ChatOpenAI:
+    """LLM-клиент кэшируется на процесс (он stateless и thread-safe). Агент же
+    собирается per-request, потому что его tool несёт скоуп текущего юзера.
+    lru_cache даёт thread-safe one-shot init без ручного double-checked locking.
+    Если нужно сменить ключ или модель в рантайме — вызвать _get_llm.cache_clear()."""
+    return ChatOpenAI(
         model=settings.LLM_MODEL,
         temperature=settings.LLM_TEMPERATURE,
         max_tokens=settings.LLM_MAX_TOKENS,
@@ -156,22 +208,6 @@ def _build_agent():
             "X-Title": settings.OPENROUTER_X_TITLE,
         },
     )
-    # Без state_modifier — system prompt инжектится per-request в answer_question,
-    # потому что включает динамический список документов текущего notebook'а
-    # (нужен для мета-вопросов и для подбора поисковых формулировок).
-    return create_react_agent(
-        model=llm,
-        tools=[search_documents],
-    )
-
-
-def get_agent():
-    global _agent
-    if _agent is None:
-        with _agent_lock:
-            if _agent is None:
-                _agent = _build_agent()
-    return _agent
 
 
 def _log_usage(messages: list) -> None:
@@ -274,8 +310,10 @@ def answer_question(
     history = history or []
     history = _truncate_history(history, settings.MAX_HISTORY_MESSAGES)
 
-    _reset_thread_state(user_id, notebook_id)
-    agent = get_agent()
+    state = _RequestState(user_id=user_id, notebook_id=notebook_id)
+    # Агент собирается per-request: tool несёт замыкание на state со скоупом
+    # пользователя. LLM-клиент при этом переиспользуется (см. _get_llm).
+    agent = create_react_agent(model=_get_llm(), tools=[_build_search_tool(state)])
 
     # Динамический system prompt: правила + актуальный список документов
     # текущего ноутбука. На мета-вопросах ("какие документы загружены") агент
@@ -330,7 +368,7 @@ def answer_question(
             answer = msg.content if isinstance(msg.content, str) else str(msg.content)
             break
 
-    cited = _collect_cited(result["messages"]) or [
+    cited = _collect_cited(result["messages"], user_id=user_id, notebook_id=notebook_id) or [
         {
             "chunk_id": h.chunk.id,
             "document_id": h.document.id,
@@ -341,7 +379,7 @@ def answer_question(
             "score": h.score,
             "snippet": h.chunk.text[:500],
         }
-        for h in _get_hits()
+        for h in state.hits
     ]
 
     # Пост-сверка ответа с найденными фрагментами. Стоит +1 LLM-вызов на
@@ -372,6 +410,23 @@ def answer_question(
         except Exception as e:
             log.warning("[L4] strict verifier failed: %s", e)
 
+    # ---- Defense L3: warn-режим — приклеиваем накопленные плашки в конец ----
+    # В drop-режиме L3 уже выкинул подозрительные чанки из выдачи на этапе
+    # search_documents tool, и сюда они не попали. В warn-режиме чанки остались
+    # в выдаче (LLM могла их использовать в ответе), но мы добавляем плашку
+    # с информацией пользователю.
+    l3_warnings = list(getattr(state, "l3_warnings", []) or [])
+    if l3_warnings:
+        # Дедуп: один и тот же документ часто всплывает в нескольких search-
+        # вызовах одного turn'а. Склеиваем в одну плашку.
+        seen = set()
+        unique = []
+        for w in l3_warnings:
+            if w not in seen:
+                seen.add(w)
+                unique.append(w)
+        answer = (answer.rstrip() + "\n" + "\n".join(unique)).strip()
+
     return {
         "answer": answer,
         "cited_chunks": cited,
@@ -380,8 +435,16 @@ def answer_question(
     }
 
 
-def _collect_cited(messages: list) -> list[dict[str, Any]]:
-    """Собирает cited_chunks из ToolMessage-ов."""
+def _collect_cited(
+    messages: list,
+    user_id: Optional[int] = None,
+    notebook_id: Optional[int] = None,
+) -> list[dict[str, Any]]:
+    """Собирает cited_chunks из ToolMessage-ов. Проверяет, что каждый chunk_id
+    принадлежит текущему пользователю/ноутбуку: текст ToolMessage может быть
+    подделан (отравленный чанк с литералом «[chunk_id=42]» в теле, либо LLM,
+    повторяющий маркер из истории) — без owner-фильтра отсюда могут утечь
+    чанки чужих документов в response.cited_chunks."""
     scores: dict[int, float] = {}
     order: list[int] = []
     for msg in messages:
@@ -394,6 +457,16 @@ def _collect_cited(messages: list) -> list[dict[str, Any]]:
             if cid not in scores:
                 order.append(cid)
             scores[cid] = max(scores.get(cid, 0.0), score)
+
+    if not order:
+        return []
+
+    if user_id is not None:
+        owners = db.get_chunk_owners(order)
+        order = [cid for cid in order if owners.get(cid) == user_id]
+    if notebook_id is not None and order:
+        notebooks = db.get_chunk_notebooks(order)
+        order = [cid for cid in order if notebooks.get(cid) == notebook_id]
 
     if not order:
         return []

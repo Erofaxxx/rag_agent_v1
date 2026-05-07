@@ -39,6 +39,16 @@ class Settings(BaseSettings):
     LOGIN_LOCKOUT_MINUTES: int = 15
     RATE_LIMIT_LOGIN_PER_MINUTE: int = 10
     RATE_LIMIT_REGISTER_PER_HOUR: int = 5
+    # Лимит на /api/chat — каждый авторизованный запрос идёт в LLM (платно).
+    RATE_LIMIT_CHAT_PER_MINUTE: int = 30
+    # Лимит на загрузку документов — каждая загрузка спавнит парсер и эмбеддинг
+    # пайплайн, который активно жрёт CPU/RAM/квоту эмбеддингов.
+    RATE_LIMIT_UPLOAD_PER_MINUTE: int = 20
+    # Доверять X-Forwarded-For / X-Real-IP. По умолчанию OFF: атакующий иначе
+    # подделывает заголовок и обходит per-IP rate limiter и audit-log с разными
+    # «адресами». Включать ТОЛЬКО когда сервис стоит за trusted reverse-proxy
+    # (Caddy/nginx), который перезаписывает заголовок на реальный client IP.
+    TRUST_PROXY_HEADERS: bool = False
 
     # Paths
     DATA_DIR: str = "./data"
@@ -60,8 +70,14 @@ class Settings(BaseSettings):
     # для экономии места и ускорения, но качество падает. 0 = использовать default.
     YANDEX_EMBEDDING_DIMENSIONS: int = 0
     # Защита от throttle. Yandex не публикует точный RPM, поэтому делаем
-    # консервативный лимит на стороне клиента.
+    # консервативный лимит на стороне клиента. По дефолту лимит ~10 RPS на
+    # папку, для большинства инсталляций 600 RPM (=10 RPS) безопасно.
     YANDEX_EMBEDDING_RPM: int = 600
+    # Параллелизм при индексации документа. SDK не поддерживает batch-эндпоинт
+    # (один text на запрос), но запросы можно слать параллельно — RPS-бюджет
+    # тратит slot-based throttle ниже. CONCURRENCY=8 при RPM=600 (≈10 RPS)
+    # даёт 3-5× ускорение индексации без риска получить 429.
+    YANDEX_EMBEDDING_CONCURRENCY: int = 8
     # Yandex embedding context — 2048 токенов (≈ 6000-8000 русских символов).
     # Чанк длиннее — будет обрезан сервером, потеряем контекст.
     YANDEX_EMBEDDING_MAX_CHARS: int = 6000
@@ -189,6 +205,29 @@ class Settings(BaseSettings):
     # Действие аналогично L1.
     DEFENSE_L2_ANOMALY: str = "off"
     DEFENSE_L2_ZSCORE_THRESHOLD: float = 2.5
+
+    # L3: query-ablation детектор trigger-based backdoor'ов (BadNets-style).
+    # Generic защита: для каждого «значимого» слова запроса делаем дополнительный
+    # retrieval с удалённым словом. Чанк, который выпадает из top-k при удалении
+    # одного слова, считается «триггер-активированным» и помечается как
+    # подозрительный. В отличие от L1/L4 не зависит от знания шаблонов атаки —
+    # ловит любые перефразированные стелс-бэкдоры с триггером в запросе.
+    # Стоимость: до DEFENSE_L3_MAX_ABLATIONS дополнительных FAISS-поисков
+    # на каждый search_documents вызов; БЕЗ LLM-вызовов.
+    # Действие: 'off' / 'warn' (плашка в ответе) / 'drop' (выкидываем chunks).
+    DEFENSE_L3_QUERY_ABLATION: str = "off"
+    # Trigger threshold: chunk считается подозрительным, если выпал из top-k
+    # при доле ≥ threshold ablations. Реальные триггеры обычно состоят из
+    # 2-3 редких слов, поэтому удаление 1-2 из них ломает retrieval —
+    # 0.5 даёт хороший signal-to-noise для multi-word триггеров.
+    DEFENSE_L3_TRIGGER_THRESHOLD: float = 0.5
+    # Сколько слов запроса максимум абляровать (топ N по длине). Триггеры
+    # обычно содержат редкие/длинные слова, потому 8 хватает на 99% реальных
+    # запросов. Каждое ablation = +1 FAISS-вызов, поэтому не задирай.
+    DEFENSE_L3_MAX_ABLATIONS: int = 8
+    # Минимальная длина core-слова, чтобы считаться кандидатом для ablation.
+    # Защита от трат FAISS-вызовов на «и»/«в»/«на».
+    DEFENSE_L3_MIN_WORD_LEN: int = 4
 
     # L4: расширенный верификатор ответа. К текущему verify_answer добавляет
     # проверку injection-паттернов в самих cited chunks — если триггер
