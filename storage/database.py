@@ -264,13 +264,21 @@ class Database:
     def cursor(self) -> Iterator[sqlite3.Cursor]:
         with self._lock:
             conn = self._connect()
+            cur: Optional[sqlite3.Cursor] = None
             try:
                 cur = conn.cursor()
                 cur.execute("BEGIN")
                 yield cur
                 cur.execute("COMMIT")
             except Exception:
-                cur.execute("ROLLBACK")
+                # Если упало на conn.cursor() или на BEGIN — cur может быть
+                # None или нерабочим; не пытаемся ROLLBACK поверх и не
+                # маскируем оригинальную ошибку NameError-ом.
+                if cur is not None:
+                    try:
+                        cur.execute("ROLLBACK")
+                    except Exception:
+                        pass
                 raise
             finally:
                 conn.close()
@@ -405,6 +413,15 @@ class Database:
             chunk_ids = [int(r["id"]) for r in cur.fetchall()]
             cur.execute("DELETE FROM documents WHERE id=?", (document_id,))
             return chunk_ids
+
+    def delete_chunks_for_document(self, document_id: int) -> int:
+        """Удаляет ВСЕ chunks документа, но саму запись documents оставляет.
+        Нужно для security defenses: документ помечается как 'error' с
+        пояснением, файл лежит в uploads/, а chunks в БД и в FAISS отсутствуют.
+        Возвращает число удалённых chunks."""
+        with self.cursor() as cur:
+            cur.execute("DELETE FROM chunks WHERE document_id=?", (document_id,))
+            return int(cur.rowcount or 0)
 
     # --- chunks ---
 

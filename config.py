@@ -193,6 +193,26 @@ class Settings(BaseSettings):
     # сначала прогнать базовый сценарий (агент работает как раньше),
     # потом снять метрики атак, и только затем включать защиты слой за слоем.
 
+    # L0: corpus consistency / near-duplicate document detection at ingest.
+    # Generic защита против гибридного backdoor: атакующий клонирует
+    # легитимный документ корпуса и вшивает 1-2 раздела с target-фразой.
+    # На уровне отдельного chunk такой payload не отличим (тематика та же,
+    # лексика нормальная), но на уровне документа видно: 70-95% chunks
+    # почти идентичны (cosine ≥ similarity_threshold) другому документу из
+    # индекса, плюс есть 1-2 inserted chunks без аналогов. Стоимость:
+    # дополнительный FAISS-поиск на каждый chunk нового документа при ingest;
+    # без LLM. Действие: 'off' / 'warn' / 'drop' (документ блокируется).
+    DEFENSE_L0_CORPUS_CONSISTENCY: str = "off"
+    # Cosine, при котором пара chunks считается «почти идентичной». 0.92 — эмпирически
+    # хорошо отделяет «копия» от «просто близкая тема» на embeddings-моделях
+    # типа BGE-M3 / Yandex text-search. Снижение → больше FP, рост → пропускает
+    # «слегка перефразированные» клоны.
+    DEFENSE_L0_SIMILARITY_THRESHOLD: float = 0.92
+    # Доля chunks нового документа, чьи лучшие соседи лежат в одном и том же
+    # существующем документе. 0.7 = «70% чанков нового — почти-копии чанков
+    # одного и того же файла, плюс есть inserted разделы».
+    DEFENSE_L0_DUPLICATE_RATIO_THRESHOLD: float = 0.7
+
     # L1: sanitization чанков на ingest. Ищет prompt-injection паттерны,
     # role-switch, фейковые цитаты в тексте, подозрительные unicode-блоки.
     # Действие: 'off' (только лог), 'warn' (помечает risk_score), 'drop'
@@ -233,6 +253,22 @@ class Settings(BaseSettings):
     # проверку injection-паттернов в самих cited chunks — если триггер
     # «прошёл» в LLM, в ответе появится явное предупреждение.
     DEFENSE_L4_STRICT_VERIFIER: bool = False
+
+    # L5: cross-chunk contradiction detection через LLM-judge. Ловит случаи,
+    # когда retrieval вернул фрагменты с прямо противоречащими утверждениями —
+    # типичная сигнатура гибридного backdoor, в котором target-фраза вшита в
+    # тематически легитимный chunk (на уровне отдельного chunk не отличим, но
+    # рядом с настоящим правилом виден контраст). +1 LLM-вызов на каждый
+    # search_documents tool call с ≥ 2 hits.
+    # Действие: 'off' / 'warn' (плашка в ответе) / 'drop' (выкидываем minority
+    # chunks по majority-rule: тот файл, у которого больше chunks в выдаче,
+    # побеждает).
+    DEFENSE_L5_CONTRADICTION_DETECTOR: str = "off"
+    # Минимум hits, чтобы L5 запустился. Меньше — не с чем сравнивать.
+    DEFENSE_L5_MIN_CHUNKS_TO_CHECK: int = 2
+    # Сколько символов из каждого chunk-а скармливать LLM-judge'у. Больше —
+    # точнее детект, но дороже по токенам. 500 хватает для большинства фактов.
+    DEFENSE_L5_MAX_SNIPPET_CHARS: int = 500
 
     # Тестовый bypass-режим для security research. Когда включён, в API
     # появляется endpoint /api/security/* для прогонки eval-скриптов

@@ -1,16 +1,18 @@
 import json
 import logging
 import re
+import secrets
 import shutil
 import time
 from pathlib import Path
 from typing import Any, Optional
 
-from fastapi import APIRouter, BackgroundTasks, Depends, File, Form, HTTPException, UploadFile, status
+from fastapi import APIRouter, BackgroundTasks, Depends, File, Form, HTTPException, Request, UploadFile, status
 from fastapi.responses import FileResponse
 from pydantic import BaseModel
 
 from auth.dependencies import csrf_check, require_admin, require_user
+from auth.router import limiter
 from storage import UserRow
 from chunking import chunk_segments
 from config import settings
@@ -117,6 +119,53 @@ def _process_document(document_id: int) -> None:
         texts = [c["text"] for c in chunks]
         vectors = embedding_service.encode_passages(texts)
 
+        # ---- Defense L0: corpus consistency / near-duplicate detection ----
+        # Перед добавлением в индекс смотрим, не клон ли новый документ уже
+        # существующего (≥ ratio chunks с cosine ≥ threshold к chunks одного
+        # документа из индекса) с inserted разделами. Это типичная сигнатура
+        # стелс-бэкдора через клонирование легитимного файла.
+        l0_report = None
+        if settings.DEFENSE_L0_CORPUS_CONSISTENCY != "off":
+            from defenses.l0_corpus_consistency import (
+                build_error_message as l0_error_msg,
+                detect_near_duplicate_document,
+                short_summary as l0_summary,
+            )
+
+            def _l0_search(vec, k):
+                return faiss_index.search(vec, k)
+
+            def _l0_resolver(chunk_ids_list):
+                # Разрешаем chunk_id → (document_id, filename) одним батчем.
+                # chunks этого нового документа УЖЕ в БД, но ЕЩЁ не в FAISS
+                # (мы добавим их через faiss_index.add ниже), поэтому
+                # FAISS-search их и не вернёт — self-shadow невозможен.
+                rows = db.get_chunks_by_ids(list(chunk_ids_list))
+                doc_id_set = {r.document_id for r in rows}
+                docs = {d.id: d for d in (db.get_document(did) for did in doc_id_set) if d}
+                return {
+                    r.id: (r.document_id, docs[r.document_id].filename)
+                    for r in rows if r.document_id in docs
+                }
+
+            l0_report = detect_near_duplicate_document(
+                vectors,
+                search_fn=_l0_search,
+                chunk_to_doc_resolver=_l0_resolver,
+                similarity_threshold=settings.DEFENSE_L0_SIMILARITY_THRESHOLD,
+                duplicate_ratio_threshold=settings.DEFENSE_L0_DUPLICATE_RATIO_THRESHOLD,
+            )
+            log.info("[L0] Документ %s: %s", document_id, l0_summary(l0_report))
+            if l0_report.is_near_duplicate and settings.DEFENSE_L0_CORPUS_CONSISTENCY == "drop":
+                # Откатываем то, что уже сделали: chunks вставлены в БД,
+                # но в FAISS их ещё нет. Очищаем chunks, помечаем документ
+                # как error.
+                db.delete_chunks_for_document(document_id)
+                err = l0_error_msg(l0_report)
+                db.update_document_status(document_id, "error", error_message=err)
+                log.warning("[L0] Документ %s ЗАБЛОКИРОВАН: %s", document_id, err)
+                return  # документ не попадёт в индекс — атака предотвращена
+
         # ---- Defense L2: per-document embedding anomaly detection ----
         # Считаем z-score cosine-расстояния каждого чанка до центроида
         # документа. Чанки-outliers логируем (а в режиме 'drop' выкидываем).
@@ -170,8 +219,14 @@ def _process_document(document_id: int) -> None:
         # диска или жёсткие privacy-требования).
         if not settings.KEEP_ORIGINAL_FILES:
             try:
-                target_dir = Path(doc.file_path).parent
-                if target_dir.exists() and str(target_dir).startswith(str(settings.uploads_path)):
+                target_dir = Path(doc.file_path).parent.resolve()
+                uploads_root = settings.uploads_path.resolve()
+                # is_relative_to + неравенство корню: исключаем прямой rmtree(uploads/).
+                if (
+                    target_dir.exists()
+                    and target_dir != uploads_root
+                    and target_dir.is_relative_to(uploads_root)
+                ):
                     shutil.rmtree(target_dir, ignore_errors=True)
                     log.debug("Удалён оригинал %s (KEEP_ORIGINAL_FILES=false)", doc.file_path)
             except Exception as e:
@@ -260,8 +315,12 @@ def get_document_file(document_id: int, user: UserRow = Depends(require_user)):
     p = Path(doc.file_path)
     if not p.exists():
         raise HTTPException(404, "Файл не найден на диске")
-    # Безопасность: не отдадим файл за пределами uploads_path
-    if not str(p.resolve()).startswith(str(settings.uploads_path.resolve())):
+    # Безопасность: не отдадим файл за пределами uploads_path. Используем
+    # is_relative_to, а не str.startswith — иначе путь типа /data/uploads_evil/...
+    # ложно проходил проверку для uploads_path=/data/uploads.
+    resolved = p.resolve()
+    uploads_root = settings.uploads_path.resolve()
+    if not resolved.is_relative_to(uploads_root):
         raise HTTPException(403, "Доступ запрещён")
 
     media_types = {
@@ -311,7 +370,7 @@ def get_document_html(document_id: int, user: UserRow = Depends(require_user)) -
     p = Path(doc.file_path)
     if not p.exists():
         raise HTTPException(404, "Файл не найден на диске")
-    if not str(p.resolve()).startswith(str(settings.uploads_path.resolve())):
+    if not p.resolve().is_relative_to(settings.uploads_path.resolve()):
         raise HTTPException(403, "Доступ запрещён")
 
     ft = (doc.file_type or "").lower()
@@ -340,7 +399,9 @@ def get_document_html(document_id: int, user: UserRow = Depends(require_user)) -
     status_code=status.HTTP_202_ACCEPTED,
     dependencies=[Depends(csrf_check)],
 )
+@limiter.limit(f"{settings.RATE_LIMIT_UPLOAD_PER_MINUTE}/minute")
 async def upload_documents(
+    request: Request,
     background: BackgroundTasks,
     files: list[UploadFile] = File(...),
     notebook_id: Optional[int] = Form(None),
@@ -372,7 +433,10 @@ async def upload_documents(
         # Сначала сохраняем файл во временное место, чтобы определить тип
         tmp_dir = settings.uploads_path / "_tmp"
         tmp_dir.mkdir(parents=True, exist_ok=True)
-        tmp_path = tmp_dir / f"{int(time.time() * 1000)}_{original_name}"
+        # Уникальное имя: ms-таймстамп даёт коллизии при HTTP/2 multiplexing
+        # или batch upload, поэтому добавляем 8 байт энтропии — collision-free
+        # на любых разумных нагрузках.
+        tmp_path = tmp_dir / f"{int(time.time() * 1000)}_{secrets.token_hex(8)}_{original_name}"
 
         try:
             written = 0
@@ -409,16 +473,27 @@ async def upload_documents(
                 notebook_id=notebook_id,
             )
 
-            target_dir = settings.uploads_path / str(doc_id)
-            target_dir.mkdir(parents=True, exist_ok=True)
-            target_path = target_dir / original_name
-            shutil.move(str(tmp_path), str(target_path))
-            db.update_document_status(doc_id, "pending")
-            with db.cursor() as cur:
-                cur.execute(
-                    "UPDATE documents SET file_path=? WHERE id=?",
-                    (str(target_path), doc_id),
-                )
+            try:
+                target_dir = settings.uploads_path / str(doc_id)
+                target_dir.mkdir(parents=True, exist_ok=True)
+                target_path = target_dir / original_name
+                shutil.move(str(tmp_path), str(target_path))
+                db.update_document_status(doc_id, "pending")
+                with db.cursor() as cur:
+                    cur.execute(
+                        "UPDATE documents SET file_path=? WHERE id=?",
+                        (str(target_path), doc_id),
+                    )
+            except Exception:
+                # Файл не доехал до uploads/{doc_id}/ — нельзя оставить запись с
+                # пустым file_path, иначе документ висит в list_documents и
+                # учитывается в MAX_DOCUMENTS до следующего рестарта (где watchdog
+                # пометит error). Каскад удалит и потенциально созданные чанки.
+                try:
+                    db.delete_document(doc_id)
+                except Exception:
+                    pass
+                raise
 
             background.add_task(_process_document, doc_id)
             doc = db.get_document(doc_id)
@@ -459,9 +534,23 @@ def delete_document(document_id: int, user: UserRow = Depends(require_user)) -> 
         faiss_index.persist()
         search_service.invalidate_bm25()
         log.info("Удалён документ %s (%s), чанков: %d", document_id, doc.filename, len(chunk_ids))
+    # Audit: для security-research-сервиса удаление документа — событие интереса
+    # (вектор «удалить отравленный документ, чтобы скрыть следы»). Без записи
+    # forensics-цепочка обрывается.
+    db.log_audit(
+        event="delete_document",
+        user_id=doc.uploaded_by,
+        actor_user_id=user.id,
+        details=f"document_id={document_id} filename={doc.filename} chunks={len(chunk_ids)}",
+    )
     try:
-        target_dir = Path(doc.file_path).parent
-        if target_dir.exists() and str(target_dir).startswith(str(settings.uploads_path)):
+        target_dir = Path(doc.file_path).parent.resolve()
+        uploads_root = settings.uploads_path.resolve()
+        if (
+            target_dir.exists()
+            and target_dir != uploads_root
+            and target_dir.is_relative_to(uploads_root)
+        ):
             shutil.rmtree(target_dir, ignore_errors=True)
     except Exception as e:
         log.warning("Не удалось удалить файлы документа %s: %s", document_id, e)

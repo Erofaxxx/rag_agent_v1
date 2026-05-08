@@ -11,6 +11,9 @@
    и виден из admin UI.
 
 Слои:
+- L0 (l0_corpus_consistency): near-duplicate detection при ingest. Generic
+  защита против гибридного backdoor через клонирование легитимного документа.
+  Embeddings-only, без LLM.
 - L1 (l1_sanitize): регексы + эвристики на тексте чанка (ingest-time).
 - L2 (l2_embedding_anomaly): per-document z-score по cosine-расстоянию
   до центроида документа (ingest-time).
@@ -20,7 +23,24 @@
   (query-time). Без LLM-вызовов.
 - L4 (l4_strict_verifier): расширение существующего verify_answer
   (детектит инъекции внутри cited chunks).
+- L5 (l5_contradiction_detector): cross-chunk contradiction detection через
+  LLM-judge. Ловит гибридные атаки и просто противоречия в корпусе.
+  +1 LLM-вызов на ответ.
 """
-from defenses import l1_sanitize, l2_embedding_anomaly, l3_query_ablation, l4_strict_verifier
+from defenses import (
+    l0_corpus_consistency,
+    l1_sanitize,
+    l2_embedding_anomaly,
+    l3_query_ablation,
+    l4_strict_verifier,
+    l5_contradiction_detector,
+)
 
-__all__ = ["l1_sanitize", "l2_embedding_anomaly", "l3_query_ablation", "l4_strict_verifier"]
+__all__ = [
+    "l0_corpus_consistency",
+    "l1_sanitize",
+    "l2_embedding_anomaly",
+    "l3_query_ablation",
+    "l4_strict_verifier",
+    "l5_contradiction_detector",
+]

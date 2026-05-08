@@ -185,6 +185,52 @@ def _build_search_tool(state: _RequestState):
             except Exception as e:
                 log.warning("[L3] упал, пропускаем (атака пройдёт незамеченной): %s", e)
 
+        # ---- Defense L5: cross-chunk contradiction detection (LLM-judge) ----
+        # Ловит случаи, когда выдача содержит прямо противоречивые утверждения —
+        # типичная сигнатура гибридного backdoor (target-фраза вшита в
+        # legit-tematic chunk и в выдаче соседствует с настоящим правилом).
+        # +1 LLM-вызов на search_documents call.
+        if (
+            settings.DEFENSE_L5_CONTRADICTION_DETECTOR != "off"
+            and hits
+            and len(hits) >= settings.DEFENSE_L5_MIN_CHUNKS_TO_CHECK
+        ):
+            try:
+                from defenses.l5_contradiction_detector import (
+                    build_warning as _l5_warning,
+                    detect_contradictions as _l5_detect,
+                    filter_hits as _l5_filter,
+                    short_summary as _l5_summary,
+                )
+
+                l5_report = _l5_detect(
+                    query=query,
+                    hits=hits,
+                    llm=_get_llm(),
+                    min_chunks_to_check=settings.DEFENSE_L5_MIN_CHUNKS_TO_CHECK,
+                    max_snippet_chars=settings.DEFENSE_L5_MAX_SNIPPET_CHARS,
+                )
+                log.info("[L5] %s", _l5_summary(l5_report))
+                if l5_report.contradictions:
+                    fname_by_cid = {h.chunk.id: h.document.filename for h in hits}
+                    if settings.DEFENSE_L5_CONTRADICTION_DETECTOR == "drop":
+                        before_files = sorted({h.document.filename for h in hits})
+                        hits = _l5_filter(hits, l5_report, mode="drop")
+                        after_files = sorted({h.document.filename for h in hits})
+                        log.info(
+                            "[L5] drop minority: files before=%s; files after=%s",
+                            before_files, after_files,
+                        )
+                    else:  # warn
+                        warning_text = _l5_warning(l5_report, fname_by_cid)
+                        if warning_text:
+                            with state.lock:
+                                if not hasattr(state, "l5_warnings"):
+                                    state.l5_warnings = []
+                                state.l5_warnings.append(warning_text)
+            except Exception as e:
+                log.warning("[L5] упал, пропускаем (контрадикция не проверена): %s", e)
+
         _add_hits(state, hits)
 
         formatted = _format_hits_for_llm(hits)
@@ -417,18 +463,18 @@ def answer_question(
         except Exception as e:
             log.warning("[L4] strict verifier failed: %s", e)
 
-    # ---- Defense L3: warn-режим — приклеиваем накопленные плашки в конец ----
-    # В drop-режиме L3 уже выкинул подозрительные чанки из выдачи на этапе
-    # search_documents tool, и сюда они не попали. В warn-режиме чанки остались
-    # в выдаче (LLM могла их использовать в ответе), но мы добавляем плашку
-    # с информацией пользователю.
-    l3_warnings = list(getattr(state, "l3_warnings", []) or [])
-    if l3_warnings:
-        # Дедуп: один и тот же документ часто всплывает в нескольких search-
-        # вызовах одного turn'а. Склеиваем в одну плашку.
+    # ---- Defense L3 / L5: warn-режим — приклеиваем накопленные плашки ----
+    # В drop-режиме они уже выкинули подозрительные чанки на этапе
+    # search_documents tool. В warn-режиме чанки остались, но мы добавляем
+    # плашки с информацией пользователю. Дедуп: один документ часто
+    # всплывает в нескольких search-вызовах одного turn'а — склеиваем.
+    pending_warnings: list[str] = []
+    pending_warnings.extend(getattr(state, "l3_warnings", []) or [])
+    pending_warnings.extend(getattr(state, "l5_warnings", []) or [])
+    if pending_warnings:
         seen = set()
         unique = []
-        for w in l3_warnings:
+        for w in pending_warnings:
             if w not in seen:
                 seen.add(w)
                 unique.append(w)
