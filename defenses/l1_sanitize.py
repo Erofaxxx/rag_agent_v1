@@ -78,7 +78,7 @@ _PATTERNS: dict[str, tuple[float, list[re.Pattern]]] = {
         ],
     ),
     "direct_instruction": (
-        0.35,
+        0.5,
         [
             re.compile(r"\brespond\s+(?:only\s+)?with\s+[\"']", re.IGNORECASE),
             re.compile(r"\boutput\s+(?:exactly|only)\s+[\"']", re.IGNORECASE),
@@ -104,12 +104,15 @@ _PATTERNS: dict[str, tuple[float, list[re.Pattern]]] = {
     "suspicious_unicode": (
         0.3,
         [
-            # Zero-width: ​–‍, ﻿. Часто прячут инструкции «между» словами.
-            re.compile(r"[​-‍﻿]"),
-            # Bidi override: ‪–‮
-            re.compile(r"[‪-‮]"),
-            # Tag chars (Plane 14) — современные prompt-injection через emoji-tags
-            re.compile(r"[\U000e0000-\U000e007f]"),
+            # Zero-width spaces / joiners / BOM. Часто прячут инструкции
+            # «между» словами. Перечисляем явно: коды не образуют непрерывный
+            # диапазон, и литеральные range-выражения раньше захватывали
+            # нерелевантную часть таблицы и/или пропускали часть нужных кодпоинтов.
+            re.compile(r"[​‌‍⁠﻿]"),
+            # Bidi override / isolate: U+202A..U+202E + U+2066..U+2069.
+            re.compile(r"[‪-‮⁦-⁩]"),
+            # Tag chars (Plane 14) — современный prompt-injection через emoji-tags.
+            re.compile(r"[\U000E0000-\U000E007F]"),
         ],
     ),
 }
