@@ -439,8 +439,26 @@ def build_report(result: AuditResult, manifest_attacks: list[dict]) -> str:
                 "skip" if "skipped" in l0 else ("clean" if "clean" in l0 else "—")
             )
         )
-        l1_short = "warn" if "warn" in l1 and "0/" not in l1 else ("clean" if "clean" in l1 else "—" if not l1 else "?")
-        l2_short = "skip" if "skipped" in l2 else ("flag" if "flagged" in l2.lower() else ("clean" if l2 else "—"))
+        # L1: "1/1 warn" → fired; "0/1 warn" или "N chunks clean" → не fired
+        m1 = re.search(r"^(\d+)/\d+\s+warn", l1)
+        if m1 and int(m1.group(1)) > 0:
+            l1_short = "warn"
+        elif "clean" in l1:
+            l1_short = "clean"
+        elif l1:
+            l1_short = "clean"
+        else:
+            l1_short = "—"
+        # L2: "0/N flagged" → не сработал; "N/M flagged" с N>0 → сработал
+        m2 = re.search(r"(\d+)/\d+\s+flagged", l2)
+        if "skipped" in l2:
+            l2_short = "skip"
+        elif m2:
+            l2_short = "flag" if int(m2.group(1)) > 0 else "clean"
+        elif l2:
+            l2_short = "clean"
+        else:
+            l2_short = "—"
         blocked = ev.blocked_by or ""
 
         marker = "★" if is_attack else " "
