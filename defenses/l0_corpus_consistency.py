@@ -212,14 +212,16 @@ def detect_near_duplicate_document(
     primary_count = duplicate_doc_counter[primary_doc_id]
     primary_ratio = primary_count / n
 
-    is_near_duplicate = (
-        primary_ratio >= duplicate_ratio_threshold
-        # Должны быть И клонированные части (primary_ratio высокий), И inserted
-        # (хотя бы один уникальный chunk). Иначе это просто полная копия — её мы
-        # не считаем backdoor (это просто загрузка дубля, не атака; для этого
-        # нужен дедуп при загрузке, не security defense).
-        and len(inserted) >= 1
-    )
+    # Любая высокая структурная похожесть на существующий документ — flag.
+    # Раньше требовали И клонированную часть, И ≥1 inserted chunk («backdoor =
+    # копия + вставка»), но на практике для коротких документов с большими
+    # CHUNK_SIZE inserted-раздел растворяется в смежных chunks (cosine 0.95+
+    # с оригиналом) и формально inserted=0. Поэтому полный клон тоже считаем
+    # подозрительным: либо это data-poisoning (полная копия с subtle правками
+    # в одном-двух токенах, embedding-blind), либо просто дубль того же файла —
+    # пользователю всё равно полезно увидеть warning, а в drop-mode админ
+    # разрулит вручную.
+    is_near_duplicate = primary_ratio >= duplicate_ratio_threshold
 
     return L0Report(
         is_near_duplicate=is_near_duplicate,
@@ -256,11 +258,22 @@ def build_error_message(report: L0Report) -> str:
     """Сообщение для статуса документа в БД."""
     if not report.is_near_duplicate:
         return ""
+    n_inserted = len(report.inserted_chunk_indices)
+    if n_inserted >= 1:
+        kind = (
+            f"копия {report.primary_match_filename!r} "
+            f"с {n_inserted} вшитыми разделами "
+            f"({report.duplicate_ratio:.0%} chunks идентичны)"
+        )
+    else:
+        kind = (
+            f"полный клон документа {report.primary_match_filename!r} "
+            f"({report.duplicate_ratio:.0%} chunks идентичны; либо дубликация, "
+            "либо backdoor с subtle правками, неуловимыми на уровне embedding)"
+        )
     return (
-        f"L0 защита: документ выглядит как копия {report.primary_match_filename!r} "
-        f"с {len(report.inserted_chunk_indices)} вшитыми разделами "
-        f"({report.duplicate_ratio:.0%} chunks идентичны). "
+        f"L0 защита: документ выглядит как {kind}. "
         "Это типичный паттерн trigger-based backdoor-атаки. "
-        "Проверьте документ и удалите inserted разделы либо отключите "
-        "DEFENSE_L0_CORPUS_CONSISTENCY, чтобы загрузить как есть."
+        "Проверьте документ или отключите DEFENSE_L0_CORPUS_CONSISTENCY, "
+        "чтобы загрузить как есть."
     )

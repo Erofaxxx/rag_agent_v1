@@ -74,14 +74,15 @@ class TestL0CorpusConsistency:
         )
         assert report.is_near_duplicate is False
 
-    def test_full_duplicate_no_inserted_chunks(self):
-        """Полный клон без inserted разделов → near-duplicate=False (не атака).
+    def test_full_duplicate_caught(self):
+        """Полный клон документа → near-duplicate=True.
 
-        Полный дубль документа — это просто дубликация при загрузке,
-        organisational issue, а не security defense. L0 должна срабатывать
-        только когда есть и клонированная часть, и уникальные inserted —
-        классический паттерн backdoor."""
-        # Документ 1 в индексе из 4 chunks
+        Раньше требовали inserted ≥ 1, но в реальной атаке с большим
+        CHUNK_SIZE inserted раздел может «размазаться» по соседним chunks
+        и не дать ни одного chunk с cosine ниже similarity_threshold.
+        Поэтому полный клон тоже flag'аем — либо это безобидный дубль
+        (юзер увидит warning), либо subtle data-poisoning, неуловимый
+        на уровне embedding."""
         v1, v2, v3, v4 = _vec(1), _vec(2), _vec(3), _vec(4)
         index = {
             10: (v1, 1, "regulation.md"),
@@ -90,7 +91,6 @@ class TestL0CorpusConsistency:
             13: (v4, 1, "regulation.md"),
         }
         search_fn, resolver = _fake_index(index)
-        # Новый документ — те же 4 vector'а (полный клон, без inserted)
         new_vecs = np.stack([v1, v2, v3, v4])
         report = detect_near_duplicate_document(
             new_vecs,
@@ -99,10 +99,11 @@ class TestL0CorpusConsistency:
             similarity_threshold=0.92,
             duplicate_ratio_threshold=0.7,
         )
-        # 100% chunks нашли двойников, но inserted_chunk_indices пустой
         assert report.duplicate_ratio == 1.0
         assert report.inserted_chunk_indices == []
-        assert report.is_near_duplicate is False, "полный клон без inserted — не атака"
+        assert report.is_near_duplicate is True, (
+            "полный клон должен помечаться (defensive default)"
+        )
 
     def test_clone_with_inserted_section_caught(self):
         """Клон с 1 inserted разделом → near-duplicate=True, в нашей атаке
