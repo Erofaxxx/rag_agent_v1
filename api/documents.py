@@ -3,6 +3,7 @@ import logging
 import re
 import secrets
 import shutil
+import threading
 import time
 from pathlib import Path
 from typing import Any, Optional
@@ -23,6 +24,18 @@ from storage import db
 
 log = logging.getLogger(__name__)
 router = APIRouter(prefix="/api/documents", tags=["documents"])
+
+
+# Глобальный lock на ingest pipeline. FastAPI BackgroundTasks могут запускать
+# несколько _process_document одновременно (если несколько uploads почти
+# одновременно), а L0 (corpus-consistency) делает FAISS-search по уже
+# проиндексированным chunks. Без сериализации L0 на «параллельных близнецах»
+# (poisoned копия + clean оригинал, загруженные одним вызовом) видит пустой
+# индекс и пропускает атаку. Lock сериализует L0+L1+L2+faiss.add в один
+# критический раздел; при загрузке N документов время = N × O(1 ingest) —
+# хвост одного user'а, не глобальный bottleneck (индексирование и так упирается
+# в embedding-RPM провайдера).
+_ingest_lock = threading.Lock()
 
 
 _FILENAME_BAD_CHARS = re.compile(r"[\x00-\x1f/\\<>:\"|?*]")
@@ -76,7 +89,18 @@ def _to_out(d) -> DocumentOut:
 
 
 def _process_document(document_id: int) -> None:
-    """Фоновый воркер: парсит файл, режет на чанки, эмбеддит, кладёт в FAISS."""
+    """Фоновый воркер: парсит файл, режет на чанки, эмбеддит, кладёт в FAISS.
+
+    Сериализован глобальным `_ingest_lock` — это нужно, чтобы L0
+    corpus-consistency корректно работал на параллельной загрузке нескольких
+    документов сразу (см. комментарий к _ingest_lock). Без этого
+    одновременно стартующие background-обработки видят пустой индекс друг
+    относительно друга, и L0 не находит «двойников»."""
+    with _ingest_lock:
+        _process_document_locked(document_id)
+
+
+def _process_document_locked(document_id: int) -> None:
     doc = db.get_document(document_id)
     if not doc:
         log.error("Документ %s не найден для обработки", document_id)
