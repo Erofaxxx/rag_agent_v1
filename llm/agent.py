@@ -127,6 +127,18 @@ def _build_search_tool(state: _RequestState):
         # Все ablations — single-query через ablation_mode=True (без multi-query/
         # HyDE/reformulate), иначе эффект размывается.
         l3_warning = ""
+        l3_report = None  # будет переиспользован L5 для augment'а
+
+        # ablation_retrieve используется и L3, и L5-augment'ом, объявляем выше try-блока
+        def _ablation_retrieve(q: str):
+            return search_service.search(
+                q,
+                k=None,
+                owner_user_id=state.user_id,
+                notebook_id=state.notebook_id,
+                ablation_mode=True,
+            )
+
         if settings.DEFENSE_L3_QUERY_ABLATION != "off" and hits:
             try:
                 from defenses.l3_query_ablation import (
@@ -135,15 +147,6 @@ def _build_search_tool(state: _RequestState):
                     filter_hits as _l3_filter,
                     short_summary as _l3_summary,
                 )
-
-                def _ablation_retrieve(q: str):
-                    return search_service.search(
-                        q,
-                        k=None,
-                        owner_user_id=state.user_id,
-                        notebook_id=state.notebook_id,
-                        ablation_mode=True,
-                    )
 
                 l3_report = detect_query_specific_chunks(
                     query=query,
@@ -203,9 +206,49 @@ def _build_search_tool(state: _RequestState):
                     short_summary as _l5_summary,
                 )
 
+                # AUGMENT: если L3 нашёл trigger-кандидатов, добавляем к выдаче
+                # chunks из ablation-выдачи (запрос с удалёнными suspicious-словами).
+                # Это даёт L5 «нейтральный» контекст того же топика рядом с
+                # триггерными chunks — иначе при retrieval-by-trigger LLM-judge
+                # видит только poisoned chunks и не находит противоречий.
+                hits_for_l5 = list(hits)
+                seen_ids = {h.chunk.id for h in hits_for_l5}
+                # Augment: дополнительный retrieval по «очищенному» запросу
+                # без подозрительных слов. Это даёт L5 «нейтральный» контекст
+                # того же топика рядом с триггерными chunks — иначе при
+                # retrieval-by-trigger LLM-judge видит только poisoned chunks
+                # и не находит противоречий. Эвристика: если есть suspicious
+                # chunks от L3 — берём их candidates как «удалить»; иначе
+                # просто пропускаем длинные слова длиной ≥ 7 символов
+                # (вероятные редкие термины-триггеры).
+                try:
+                    words_to_remove: set[str] = set()
+                    if l3_report and l3_report.suspicious_chunk_ids and l3_report.candidates_tested:
+                        words_to_remove = {w.lower() for w in l3_report.candidates_tested}
+                    if words_to_remove:
+                        cleaned = " ".join(
+                            t for t in query.split()
+                            if t.lower().strip(".,;:!?«»\"'") not in words_to_remove
+                        ).strip()
+                        if cleaned and len(cleaned) >= 3 and cleaned != query.strip():
+                            extra = _ablation_retrieve(cleaned)
+                            added = 0
+                            for h in extra or []:
+                                if h.chunk.id not in seen_ids:
+                                    hits_for_l5.append(h)
+                                    seen_ids.add(h.chunk.id)
+                                    added += 1
+                            log.info(
+                                "[L5] augment: запрос %r → %r, добавлено %d chunks "
+                                "(было %d, стало %d)",
+                                query, cleaned, added, len(hits), len(hits_for_l5),
+                            )
+                except Exception as e:
+                    log.debug("[L5] augment пропущен: %s", e)
+
                 l5_report = _l5_detect(
                     query=query,
-                    hits=hits,
+                    hits=hits_for_l5,
                     llm=_get_llm(),
                     min_chunks_to_check=settings.DEFENSE_L5_MIN_CHUNKS_TO_CHECK,
                     max_snippet_chars=settings.DEFENSE_L5_MAX_SNIPPET_CHARS,
