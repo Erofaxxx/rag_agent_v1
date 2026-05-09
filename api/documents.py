@@ -156,20 +156,30 @@ def _process_document_locked(document_id: int) -> None:
                 short_summary as l0_summary,
             )
 
+            # SCOPE: L0 ищет «двойников» только в пределах того же ноутбука.
+            # Иначе на admin-аккаунте FP — chunks этого же файла из других
+            # ноутбуков пользователя (или ноутбуков других пользователей,
+            # если admin) маскируют как backdoor легитимную загрузку.
+            # Сценарий: пользователь работает с одним и тем же документом в
+            # нескольких ноутбуках — это норма, не атака. Атаковать через
+            # near-duplicate можно только в пределах одного notebook'а
+            # (где у атакующего есть write-access).
+            scope_notebook_id = doc.notebook_id
+
             def _l0_search(vec, k):
-                return faiss_index.search(vec, k)
+                # Ищем больше соседей чем нужно — потом отфильтруем по scope
+                return faiss_index.search(vec, k * 3)
 
             def _l0_resolver(chunk_ids_list):
-                # Разрешаем chunk_id → (document_id, filename) одним батчем.
-                # chunks этого нового документа УЖЕ в БД, но ЕЩЁ не в FAISS
-                # (мы добавим их через faiss_index.add ниже), поэтому
-                # FAISS-search их и не вернёт — self-shadow невозможен.
                 rows = db.get_chunks_by_ids(list(chunk_ids_list))
                 doc_id_set = {r.document_id for r in rows}
                 docs = {d.id: d for d in (db.get_document(did) for did in doc_id_set) if d}
                 return {
                     r.id: (r.document_id, docs[r.document_id].filename)
-                    for r in rows if r.document_id in docs
+                    for r in rows
+                    if r.document_id in docs
+                    # Фильтр по scope: только chunks из того же ноутбука
+                    and docs[r.document_id].notebook_id == scope_notebook_id
                 }
 
             l0_report = detect_near_duplicate_document(
@@ -226,8 +236,14 @@ def _process_document_locked(document_id: int) -> None:
                 )
                 from llm.verifier import _get_llm as _l6_get_llm
 
+                # SCOPE: L6, как и L0, ищет противоречия только в пределах
+                # того же ноутбука. Иначе кросс-notebook ложные срабатывания
+                # (один пользователь хранит несколько редакций одного
+                # регламента в разных ноутбуках — это норма, не атака).
+                scope_notebook_id_l6 = doc.notebook_id
+
                 def _l6_search(vec, k):
-                    return faiss_index.search(vec, k)
+                    return faiss_index.search(vec, k * 3)
 
                 def _l6_resolver(cids):
                     rows = db.get_chunks_by_ids(list(cids))
@@ -235,7 +251,9 @@ def _process_document_locked(document_id: int) -> None:
                     docs = {d.id: d for d in (db.get_document(did) for did in doc_id_set) if d}
                     return {
                         r.id: (r.text, docs[r.document_id].filename, r.document_id)
-                        for r in rows if r.document_id in docs
+                        for r in rows
+                        if r.document_id in docs
+                        and docs[r.document_id].notebook_id == scope_notebook_id_l6
                     }
 
                 l6_llm = _l6_get_llm()
