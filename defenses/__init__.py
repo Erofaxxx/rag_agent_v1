@@ -34,6 +34,7 @@ from defenses import (
     l3_query_ablation,
     l4_strict_verifier,
     l5_contradiction_detector,
+    l6_ingest_contradiction,
 )
 
 __all__ = [
@@ -43,4 +44,5 @@ __all__ = [
     "l3_query_ablation",
     "l4_strict_verifier",
     "l5_contradiction_detector",
+    "l6_ingest_contradiction",
 ]

@@ -212,6 +212,54 @@ def _process_document_locked(document_id: int) -> None:
                 else:
                     raise ValueError("L2 пометил все чанки как аномалии — документ выглядит подозрительно целиком")
 
+        # ---- Defense L6: ingest-time contradiction check (LLM-judge) ----
+        # Закрывает атаки, не пойманные L0/L1/L2: «новая редакция»,
+        # одиночные триггер-утверждения, content-conflicts. Делает
+        # LLM-judge для каждого chunk c соседями в индексе (cosine ≥
+        # similarity_threshold). +1 LLM-вызов на chunk; обычно их 1-3.
+        if settings.DEFENSE_L6_INGEST_CONTRADICTION != "off":
+            try:
+                from defenses.l6_ingest_contradiction import (
+                    build_error_message as l6_error_msg,
+                    detect_ingest_contradiction,
+                    short_summary as l6_summary,
+                )
+                from llm.verifier import _get_llm as _l6_get_llm
+
+                def _l6_search(vec, k):
+                    return faiss_index.search(vec, k)
+
+                def _l6_resolver(cids):
+                    rows = db.get_chunks_by_ids(list(cids))
+                    doc_id_set = {r.document_id for r in rows}
+                    docs = {d.id: d for d in (db.get_document(did) for did in doc_id_set) if d}
+                    return {
+                        r.id: (r.text, docs[r.document_id].filename, r.document_id)
+                        for r in rows if r.document_id in docs
+                    }
+
+                l6_llm = _l6_get_llm()
+                if l6_llm is not None:
+                    l6_report = detect_ingest_contradiction(
+                        new_chunk_texts=[c["text"] for c in chunks],
+                        new_chunk_vectors=vectors,
+                        search_fn=_l6_search,
+                        chunk_resolver=_l6_resolver,
+                        llm=l6_llm,
+                        similarity_threshold=settings.DEFENSE_L6_SIMILARITY_THRESHOLD,
+                        top_k_neighbors=settings.DEFENSE_L6_TOP_K_NEIGHBORS,
+                        max_chunks_to_check=settings.DEFENSE_L6_MAX_CHUNKS_TO_CHECK,
+                    )
+                    log.info("[L6] Документ %s: %s", document_id, l6_summary(l6_report))
+                    if l6_report.has_contradiction and settings.DEFENSE_L6_INGEST_CONTRADICTION == "drop":
+                        db.delete_chunks_for_document(document_id)
+                        err = l6_error_msg(l6_report)
+                        db.update_document_status(document_id, "error", error_message=err)
+                        log.warning("[L6] Документ %s ЗАБЛОКИРОВАН: %s", document_id, err)
+                        return
+            except Exception as e:
+                log.warning("[L6] упал, пропускаем: %s", e)
+
         faiss_index.add(vectors, chunk_ids)
         faiss_index.persist()
         search_service.invalidate_bm25()

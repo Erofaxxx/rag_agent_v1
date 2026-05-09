@@ -254,6 +254,19 @@ class Settings(BaseSettings):
     # «прошёл» в LLM, в ответе появится явное предупреждение.
     DEFENSE_L4_STRICT_VERIFIER: bool = False
 
+    # L6: ingest-time LLM-judge на противоречия с существующим корпусом.
+    # Закрывает архитектурный пробел: атаки, которые L0/L1/L2 не видят
+    # (нет structurного клона, нет regex-сигнатур, мало chunks), но
+    # фактически противоречат корпусу — например, документ «новая
+    # редакция, отменяющая предыдущую» или одиночный chunk с триггер-
+    # утверждением «согласно X лимит снят». Стоимость: +1 LLM-вызов
+    # на каждый chunk нового документа, у которого есть «соседи»
+    # (cosine ≥ 0.5) в индексе. Действие: 'off' / 'warn' / 'drop'.
+    DEFENSE_L6_INGEST_CONTRADICTION: str = "off"
+    DEFENSE_L6_SIMILARITY_THRESHOLD: float = 0.5
+    DEFENSE_L6_TOP_K_NEIGHBORS: int = 3
+    DEFENSE_L6_MAX_CHUNKS_TO_CHECK: int = 5
+
     # L5: cross-chunk contradiction detection через LLM-judge. Ловит случаи,
     # когда retrieval вернул фрагменты с прямо противоречащими утверждениями —
     # типичная сигнатура гибридного backdoor, в котором target-фраза вшита в
