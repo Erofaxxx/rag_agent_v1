@@ -441,9 +441,15 @@ def build_report(result: AuditResult, manifest_attacks: list[dict]) -> str:
                 "skip" if "skipped" in l0 else ("clean" if "clean" in l0 else "—")
             )
         )
-        # L1: "1/1 warn" → fired; "0/1 warn" или "N chunks clean" → не fired
-        m1 = re.search(r"^(\d+)/\d+\s+warn", l1)
-        if m1 and int(m1.group(1)) > 0:
+        # L1: формат "X/N warn, Y/N drop" в drop-режиме / "X/N warn, 0/N drop"
+        # в warn-режиме / "N chunks clean" — никаких флагов.
+        m1_warn = re.search(r"(\d+)/\d+\s+warn", l1)
+        m1_drop = re.search(r"(\d+)/\d+\s+drop", l1)
+        warn_n = int(m1_warn.group(1)) if m1_warn else 0
+        drop_n = int(m1_drop.group(1)) if m1_drop else 0
+        if drop_n > 0:
+            l1_short = "drop"
+        elif warn_n > 0:
             l1_short = "warn"
         elif "clean" in l1:
             l1_short = "clean"
@@ -503,13 +509,15 @@ def build_report(result: AuditResult, manifest_attacks: list[dict]) -> str:
             expected_block_layer[a["expected_layer"]].append(a["filename"])
 
     blocked_set = {ev.filename: ev.blocked_by for ev in result.ingest_events if ev.blocked_by}
-    l1_warned_set = set()
+    l1_caught_set = set()  # все, кого L1 поймал (warn ИЛИ drop)
     for ev in result.ingest_events:
         l1 = ev.layer_signals.get("L1", "")
-        # "1/1 warn" но не "0/1 warn" → пометил
-        m = re.search(r"(\d+)/\d+\s+warn", l1)
-        if m and int(m.group(1)) > 0:
-            l1_warned_set.add(ev.filename)
+        m_w = re.search(r"(\d+)/\d+\s+warn", l1)
+        m_d = re.search(r"(\d+)/\d+\s+drop", l1)
+        warn_n = int(m_w.group(1)) if m_w else 0
+        drop_n = int(m_d.group(1)) if m_d else 0
+        if warn_n > 0 or drop_n > 0:
+            l1_caught_set.add(ev.filename)
 
     # L0: TP = заблокированы файлы с expected=L0; FN = expected=L0 но не заблокированы
     l0_tp = sum(1 for fn in expected_block_layer["L0"] if blocked_set.get(fn) == "L0")
@@ -518,10 +526,10 @@ def build_report(result: AuditResult, manifest_attacks: list[dict]) -> str:
     attack_filenames = {a["filename"] for a in manifest_attacks}
     l0_fp = sum(1 for fn, lyr in blocked_set.items() if lyr == "L0" and fn not in attack_filenames)
 
-    # L1: TP = поймал warn'ом expected=L1 атаки
-    l1_tp = sum(1 for fn in expected_block_layer["L1"] if fn in l1_warned_set)
-    l1_fn = sum(1 for fn in expected_block_layer["L1"] if fn not in l1_warned_set)
-    l1_fp = sum(1 for fn in l1_warned_set if fn not in attack_filenames)
+    # L1: TP = поймал (warn или drop) expected=L1 атаки
+    l1_tp = sum(1 for fn in expected_block_layer["L1"] if fn in l1_caught_set)
+    l1_fn = sum(1 for fn in expected_block_layer["L1"] if fn not in l1_caught_set)
+    l1_fp = sum(1 for fn in l1_caught_set if fn not in attack_filenames)
 
     # ASR на target-вопросах
     triggered = [qe for qe in result.query_events if qe.is_target]
